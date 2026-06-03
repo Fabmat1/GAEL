@@ -44,6 +44,11 @@ struct GlobalSettings {
     double conv_range_hi  = 1.1;
     double conv_fraction  = 0.9;
 
+    // Continuum-placement systematic: refit cont_jitter_K times with jittered
+    // cspline anchors and fold the stellar-parameter scatter into the reported
+    // errors in quadrature.  On by default; set 0 to disable (faster fitting).
+    int    cont_jitter_K  = 6;
+
     bool   verbose        = true;
     bool   debug_plots    = false;
 
@@ -172,6 +177,8 @@ struct FitResult {
     double final_chi2  = 0.0;
     int    n_free_parameters = 0;
     int    n_data_points     = 0;
+    // number of continuum-jitter refits folded into the reported errors (0=off)
+    int    cont_jitter_K     = 0;
 
     std::vector<ComponentResult> components;
     std::vector<SpectrumResult>  spectra;

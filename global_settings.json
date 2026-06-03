@@ -24,6 +24,7 @@
         "outlierSigmaHi": 3.0,
         "convFraction": 0.9,
         "requireBlue": 0.0,
-        "filter_snr": 5.0
+        "filter_snr": 5.0,
+        "contJitterK": 6
     }
 }

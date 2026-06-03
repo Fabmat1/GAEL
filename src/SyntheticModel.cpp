@@ -5,6 +5,7 @@
 #include "specfit/SyntheticModel.hpp"
 #include "specfit/SpectrumCache.hpp"
 #include "specfit/Resolution.hpp"
+#include "specfit/Rebin.hpp"
 #include "specfit/ContinuumUtils.hpp"
 
 #include <ankerl/unordered_dense.h>   // hash mixing constant
@@ -130,8 +131,9 @@ Spectrum compute_synthetic(const ModelGrid&    grid,
             //std::cout << "[CompSynth] Doppler Shifted. Interpolating onto wl grid." << std::endl;   
 
             /* 2) interpolate onto observed wavelength grid */
-            Vector interp = interp_linear(lam_shift, surf.flux, lambda_obs);
-            
+            //Vector interp = interp_linear(lam_shift, surf.flux, lambda_obs);
+            Vector interp = trapezoidal_rebin(lam_shift, surf.flux, lambda_obs);
+
             //std::cout << "[CompSynth] Interpolated. Finishing up." << std::endl;   
             /* 3) pack the final synthetic spectrum */
             Spectrum out;

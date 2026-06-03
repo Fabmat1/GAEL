@@ -47,6 +47,12 @@ public:
 
     void run();
 
+    // Warm-started light refit for the continuum-jitter error ensemble:
+    // settle the (re-seeded) continuum at the current stellar values, then one
+    // joint continuum+stellar solve. Skips the progressive stages, the
+    // iterative-noise/outlier rejection, vsini auto-freeze, and Powell.
+    void quick_refit(int max_iterations = 60);
+
     Vector get_model_for_dataset(std::size_t dataset_idx) const;
     const LMSolverSummary& get_summary() const { return summary_; }
     const std::vector<double>& get_parameters()   const { return unified_params_; }

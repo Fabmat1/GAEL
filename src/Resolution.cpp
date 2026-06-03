@@ -6,6 +6,8 @@
 #include <tuple>
 #include <list>
 #include <mutex>
+#include <cstdlib>
+#include <string>
 
 #ifdef _OPENMP
   #include <omp.h>
@@ -178,12 +180,94 @@ static Vector apply_weights(const Vector& flux, const std::vector<WeightSegment>
     return out;
 }
 
+/* ------------------------------------------------------------------ *
+ *  Exact replica of ISIS' convolve_instrument / c_functions->convolve *
+ *  (stellar_isisscripts). For each output point i:                    *
+ *      out_i = sum_j gw_j * f_interp( lam_i - sig_i * gx_j )           *
+ *  with gx_j a UNIFORM grid on [-3,3] (sigma units, spacing<=0.015A,   *
+ *  >=15 pts/sigma), gw_j = exp(-gx_j^2/2) normalised to sum 1, and     *
+ *  f_interp linear with edge-clamping.  This is the uniform-sigma-     *
+ *  kernel + linear-interp scheme; DIGGA's default instead sums over    *
+ *  native points with dLam weights out to 5 sigma.  Selected via       *
+ *  DIGGA_CONV=isis (diagnostic toggle).                                */
+static Vector degrade_resolution_isis(const Vector& lam,
+                                      const Vector& flux,
+                                      double resOffset,
+                                      double resSlope)
+{
+    const std::ptrdiff_t n = lam.size();
+    if (n < 2) return flux;
+
+    constexpr double fwhm_to_sigma = 0.4246609001440095;
+    constexpr double max_spacing   = 0.015;
+
+    // numerical conditioning: divide by median during convolution (as ISIS)
+    Vector tmp = flux;
+    std::nth_element(tmp.data(), tmp.data() + n/2, tmp.data() + n);
+    double med = tmp[n/2];
+    if (!(med > 0.0)) med = 1.0;
+
+    // per-point sigma (wavelength units)
+    Vector sig(n);
+    double sig_max = 0.0;
+    for (std::ptrdiff_t i = 0; i < n; ++i) {
+        const double R = resOffset + resSlope * lam[i];
+        sig[i] = lam[i] / R * fwhm_to_sigma;
+        if (sig[i] > sig_max) sig_max = sig[i];
+    }
+
+    // fixed Gaussian kernel on a uniform grid over [-3,3] sigma
+    int Ng = static_cast<int>(std::lround(sig_max / max_spacing));
+    if (Ng < 15) Ng = 15;
+    const std::ptrdiff_t lg = 6 * Ng + 1;
+    Vector gx(lg), gw(lg);
+    double gsum = 0.0;
+    for (std::ptrdiff_t j = 0; j < lg; ++j) {
+        gx[j] = -3.0 + 6.0 * static_cast<double>(j) / static_cast<double>(lg - 1);
+        gw[j] = std::exp(-0.5 * gx[j] * gx[j]);
+        gsum += gw[j];
+    }
+    for (std::ptrdiff_t j = 0; j < lg; ++j) gw[j] /= gsum;
+
+    const double* fx = lam.data();
+    const double* fy = flux.data();
+    Vector out(n);
+
+    #pragma omp parallel for schedule(dynamic, 64) if (_OPENMP)
+    for (std::ptrdiff_t i = 0; i < n; ++i) {
+        double sum = 0.0;
+        const double s = sig[i];
+        // x increases as j decreases (gx ascending), mirror as in ISIS
+        for (std::ptrdiff_t j = lg - 1; j >= 0; --j) {
+            const double x = lam[i] - s * gx[j];
+            if (x <= fx[0]) {
+                sum += fy[0] * gw[j];
+            } else if (x >= fx[n - 1]) {
+                sum += fy[n - 1] * gw[j];
+            } else {
+                const std::ptrdiff_t k =
+                    std::upper_bound(fx, fx + n, x) - fx - 1;   // fx[k] <= x < fx[k+1]
+                const double t = (x - fx[k]) / (fx[k + 1] - fx[k]);
+                sum += (fy[k] + (fy[k + 1] - fy[k]) * t) * gw[j];
+            }
+        }
+        out[i] = sum;
+    }
+    (void)med;   // flux/med then *med cancels exactly for this linear operator
+    return out;
+}
+
 // Main resolution degradation function with caching
 Vector degrade_resolution(const Vector& lam,
                          const Vector& flux,
                          double resOffset,
                          double resSlope)
 {
+    {
+        const char* cv = std::getenv("DIGGA_CONV");
+        if (cv && std::string(cv) == "isis")
+            return degrade_resolution_isis(lam, flux, resOffset, resSlope);
+    }
 #ifdef DIGGA_USE_CUDA
     return degrade_resolution_cuda(lam, flux, resOffset, resSlope);
 #else

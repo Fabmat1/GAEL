@@ -10,3 +10,4 @@ input/*
 XSHOOTER_mock.json
 *.log
 analyze_digga_results.py
+build_v0/

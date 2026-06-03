@@ -13,9 +13,14 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <thread>
+#include <random>
+#include <sstream>
+#include <array>
+#include <map>
 
 namespace specfit::api {
 
@@ -129,14 +134,26 @@ bool preprocess_one(const SpectrumFileInput& f,
         return false;
     }
 
-    Vector nyq = build_nyquist_grid(raw.lambda.minCoeff(),
-                                    raw.lambda.maxCoeff(),
-                                    f.resOffset, f.resSlope);
-
+    /* ---- experiment knobs (env vars) -------------------------------- *
+     *  DIGGA_NQ_EFF = "native"  -> fit on the raw data grid (no rebin),
+     *                              like ISIS; also avoids rebinning sigma.
+     *  DIGGA_NQ_EFF = <number>  -> use that nq_eff for the Nyquist grid
+     *                              (default 2.7).                         */
+    const char* nq_env = std::getenv("DIGGA_NQ_EFF");
     Spectrum rb;
-    rb.lambda = nyq;
-    rb.flux   = trapezoidal_rebin(raw.lambda, raw.flux,  nyq);
-    rb.sigma  = trapezoidal_rebin(raw.lambda, raw.sigma, nyq);
+    if (nq_env && std::string(nq_env) == "native") {
+        rb.lambda = raw.lambda;
+        rb.flux   = raw.flux;
+        rb.sigma  = raw.sigma;
+    } else {
+        const double nq_eff = nq_env ? std::atof(nq_env) : 2.7;
+        Vector nyq = build_nyquist_grid(raw.lambda.minCoeff(),
+                                        raw.lambda.maxCoeff(),
+                                        f.resOffset, f.resSlope, nq_eff);
+        rb.lambda = nyq;
+        rb.flux   = trapezoidal_rebin(raw.lambda, raw.flux,  nyq);
+        rb.sigma  = trapezoidal_rebin(raw.lambda, raw.sigma, nyq);
+    }
 
     const auto wcut   = f.waveCut.value_or(obs.waveCut);
     const auto ignore = f.ignore.value_or(obs.ignore);
@@ -185,6 +202,25 @@ inline void push_param(std::vector<StellarParamResult>& v,
     v.push_back(s);
 }
 
+// ---------------------------------------------------------------------------
+// Re-seat one dataset's cspline anchors *in place* from the given intervals,
+// reusing its already-loaded/rebinned spectrum, and re-seed the heights from
+// the data. Used by the continuum-jitter error ensemble so the spectra are
+// never reloaded between refits.
+// ---------------------------------------------------------------------------
+void reanchor(DataSet& ds, const std::vector<std::array<double,3>>& intervals)
+{
+    std::vector<std::tuple<double,double,double>> iv;
+    iv.reserve(intervals.size());
+    for (const auto& a : intervals) iv.emplace_back(a[0], a[1], a[2]);
+    Vector cx = anchors_from_intervals(iv, ds.obs);
+    Vector cy = interp_linear(ds.obs.lambda, ds.obs.flux, cx);
+    ds.cont_x = cx;
+    ds.cont_y.assign(static_cast<std::size_t>(cx.size()), 0.0);
+    for (Eigen::Index i = 0; i < cx.size(); ++i)
+        ds.cont_y[static_cast<std::size_t>(i)] = std::max(cy[i], 1e-6);
+}
+
 } // anonymous
 
 FitResult DiggaSession::run()
@@ -225,12 +261,16 @@ FitResult DiggaSession::run()
 
     // ---- preprocess every file ---------------------------------------------
     std::vector<DataSet> datasets;
+    // anchor intervals per accepted dataset (for the continuum-jitter ensemble)
+    std::vector<std::vector<std::array<double,3>>> ds_intervals;
     for (const auto& obs : fi.observations) {
         for (const auto& f : obs.files) {
             DataSet ds;
             std::string why;
             if (preprocess_one(f, obs, gs, ds, why)) {
                 datasets.push_back(std::move(ds));
+                ds_intervals.push_back(
+                    f.cspline_anchorpoints.value_or(obs.cspline_anchorpoints));
             } else {
                 R.rejected_files.push_back(f.filename);
                 log("rejected: " + f.filename + "  (" + why + ")");
@@ -335,6 +375,88 @@ FitResult DiggaSession::run()
         R.spectra.push_back(std::move(S));
     }
     R.n_data_points = ndata;
+
+    // ---- continuum-placement systematic via anchor-jitter ensemble ---------
+    // Warm-started: reuse the already-preprocessed spectra and the converged
+    // solution; each refit only re-seats the continuum at jittered anchors and
+    // does a short continuum+stellar solve (no progressive stages, no
+    // iterative-noise rejection, no Powell). Far cheaper than a full re-fit.
+    if (gs.cont_jitter_K > 0 && !R.components.empty()) {
+        using Slot = std::vector<StellarParamResult> ComponentResult::*;
+        const std::array<Slot,8> slots = {
+            &ComponentResult::vrad, &ComponentResult::vsini,
+            &ComponentResult::zeta, &ComponentResult::teff,
+            &ComponentResult::logg, &ComponentResult::xi,
+            &ComponentResult::z,    &ComponentResult::he };
+
+        std::vector<std::array<std::vector<std::vector<double>>,8>>
+            acc(R.components.size());
+        for (std::size_t c = 0; c < R.components.size(); ++c)
+            for (int p = 0; p < 8; ++p)
+                acc[c][p].resize((R.components[c].*slots[p]).size());
+
+        const std::vector<StellarParams> warm = model.params;  // converged fit
+        const char* pn[8] = {"vrad","vsini","zeta","teff","logg","xi","z","he"};
+
+        // Freeze in the ensemble exactly what the main fit ended frozen on
+        // (e.g. vsini auto-frozen in stage 5), so the refits match the solution.
+        std::vector<std::map<std::string,bool>> frozen_ens = frozen;
+        for (std::size_t c = 0; c < R.components.size() && c < frozen_ens.size(); ++c)
+            for (int p = 0; p < 8; ++p) {
+                const auto& vec = (R.components[c].*slots[p]);
+                if (!vec.empty()) frozen_ens[c][pn[p]] = vec[0].frozen;
+            }
+
+        std::mt19937 rng(20260604u);   // fixed seed: reproducible errors
+        std::uniform_real_distribution<double> uscale(0.8,1.4), uphase(0.0,1.0);
+
+        log("[cont-jitter] continuum-placement systematic over "
+            + std::to_string(gs.cont_jitter_K) + " warm-started refits");
+
+        // silence the workflow's per-stage stdout during the ensemble
+        std::ostringstream sink;
+        std::streambuf* old = std::cout.rdbuf(sink.rdbuf());
+        try {
+            for (int k = 0; k < gs.cont_jitter_K; ++k) {
+                const double sc = uscale(rng), ph = uphase(rng);
+                for (std::size_t d = 0; d < datasets.size(); ++d) {
+                    auto iv = ds_intervals[d];
+                    for (auto& a : iv) { const double st = a[2]*sc;
+                                         a[2] = st; a[0] = a[0] + ph*st; }
+                    reanchor(datasets[d], iv);
+                }
+                model.params = warm;                       // warm start
+                ::specfit::UnifiedFitWorkflow jwf(datasets, model, wcfg, frozen_ens, nt);
+                jwf.quick_refit();
+                const auto p = jwf.get_parameters();
+                const auto& ji = jwf.get_indexer();
+                auto is_untied = [&](const char* n){
+                    return std::find(gs.untie_params.begin(), gs.untie_params.end(),
+                                     std::string(n)) != gs.untie_params.end(); };
+                for (std::size_t c = 0; c < acc.size(); ++c)
+                    for (int pp = 0; pp < 8; ++pp) {
+                        const int reps = is_untied(pn[pp]) ? (int)datasets.size() : 1;
+                        for (int d = 0; d < reps && (std::size_t)d < acc[c][pp].size(); ++d)
+                            acc[c][pp][d].push_back(p[ji.get((int)c,d,pp)]);
+                    }
+            }
+        } catch (...) { std::cout.rdbuf(old); throw; }
+        std::cout.rdbuf(old);
+
+        // fold the ensemble scatter into the reported errors (quadrature)
+        for (std::size_t c = 0; c < R.components.size(); ++c)
+            for (int p = 0; p < 8; ++p)
+                for (std::size_t d = 0; d < acc[c][p].size(); ++d) {
+                    const auto& v = acc[c][p][d];
+                    if (v.size() < 2) continue;
+                    double m = 0.0; for (double x : v) m += x; m /= v.size();
+                    double s = 0.0; for (double x : v) s += (x-m)*(x-m);
+                    s = std::sqrt(s / v.size());
+                    auto& pr = (R.components[c].*slots[p])[d];
+                    pr.error = std::sqrt(pr.error*pr.error + s*s);
+                }
+        R.cont_jitter_K = gs.cont_jitter_K;
+    }
 
     return R;
 }

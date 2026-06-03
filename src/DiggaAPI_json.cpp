@@ -42,6 +42,7 @@ GlobalSettings global_settings_from_json_file(const std::string& path)
     get_d("convRangeLo",    gs.conv_range_lo);
     get_d("convRangeHi",    gs.conv_range_hi);
     get_d("convFraction",   gs.conv_fraction);
+    get_i("contJitterK",    gs.cont_jitter_K);
 
     return gs;
 }

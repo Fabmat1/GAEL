@@ -333,6 +333,26 @@ void UnifiedFitWorkflow::stage4_full(bool add_powell) {
 }
 
 
+void UnifiedFitWorkflow::quick_refit(int max_iterations)
+{
+    // Continuum is freshly re-seeded for the jittered anchors; settle it at the
+    // (warm-started) stellar values, then do one joint continuum+stellar solve.
+    stage1_continuum_only();
+    solve_stage({ "all", "continuum" }, max_iterations, /*add_powell=*/false);
+
+    // propagate to model.params so callers reading the model see the refit
+    for (std::size_t c = 0; c < model_.params.size(); ++c) {
+        model_.params[c].vrad  = unified_params_[ indexer_.get(c,0,0) ];
+        model_.params[c].vsini = unified_params_[ indexer_.get(c,0,1) ];
+        model_.params[c].zeta  = unified_params_[ indexer_.get(c,0,2) ];
+        model_.params[c].teff  = unified_params_[ indexer_.get(c,0,3) ];
+        model_.params[c].logg  = unified_params_[ indexer_.get(c,0,4) ];
+        model_.params[c].xi    = unified_params_[ indexer_.get(c,0,5) ];
+        model_.params[c].z     = unified_params_[ indexer_.get(c,0,6) ];
+        model_.params[c].he    = unified_params_[ indexer_.get(c,0,7) ];
+    }
+}
+
 double UnifiedFitWorkflow::chi2_current() const
 {
     double chi2 = 0.0;

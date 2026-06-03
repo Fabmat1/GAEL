@@ -177,7 +177,7 @@ struct MockDataConfig {
         {"c1_HE",    {-2.0, false}}
     };
     
-    bool use_nyquist_sampling = true;  // Add this flag
+    bool use_nyquist_sampling = true; 
 };
 
 // Progress tracking

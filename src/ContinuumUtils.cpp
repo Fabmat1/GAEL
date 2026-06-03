@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cmath>       // std::abs
+#include <cstdlib>     // std::getenv
 
 namespace specfit {
 
@@ -24,14 +25,23 @@ Vector anchors_from_intervals(
     if (!spectrum.lambda.allFinite())
         throw std::runtime_error("anchors_from_intervals(): spectrum.lambda contains NaN/Inf");
 
-    /* ---------- collect non-ignored wavelengths ----------------------- */
+    /* ---------- collect wavelengths used to bound the anchor list ------ *
+     *  Default: only non-ignored (fit-window) points  ->  anchors live
+     *  inside the fit window.  ISIS instead spans the full DATA range and
+     *  adds exterior boundary anchors, giving a denser, edge-constrained
+     *  continuum.  DIGGA_ANCHORS_FULLRANGE=1 reproduces the ISIS behaviour
+     *  (clip anchors to the full data range, ignore the mask for bounds). */
+    const char* full_env = std::getenv("DIGGA_ANCHORS_FULLRANGE");
+    const bool  full_range = full_env && std::string(full_env) == "1";
+
     std::vector<double> good_lambda;
     good_lambda.reserve(spectrum.lambda.size());
 
     for (Eigen::Index i = 0; i < spectrum.lambda.size(); ++i)
     {
-        bool keep = spectrum.ignoreflag.empty() ? true
-                                                : (spectrum.ignoreflag[i] == 1);
+        bool keep = (full_range || spectrum.ignoreflag.empty())
+                        ? true
+                        : (spectrum.ignoreflag[i] == 1);
         if (keep) good_lambda.push_back(spectrum.lambda[i]);
     }
 
