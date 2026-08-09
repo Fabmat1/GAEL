@@ -1,0 +1,12 @@
+# Cached ISIS reference fits, generated mock data and exported real spectra.
+#
+# The cache is intentionally *not* committed: the mock spectra it keys off are
+# regenerated from the model grid, so entries are only valid for a given grid
+# version, and the exported real spectra are large.  Delete this directory to
+# force a full recomputation.
+cache/
+
+# Comparison artifacts (--artifacts)
+artifacts/
+__pycache__/
+*.pyc

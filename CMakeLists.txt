@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.18)
 cmake_policy(SET CMP0074 NEW)       # honour *_ROOT / CMAKE_PREFIX_PATH
 
 project(GAEL LANGUAGES C CXX Fortran)
@@ -52,8 +52,62 @@ add_compile_options(
 # ---------------------------------------------------------------------------
 # 3. CUDA (optional)
 # ---------------------------------------------------------------------------
+if(POLICY CMP0104)
+    cmake_policy(SET CMP0104 NEW)   # CUDA_ARCHITECTURES must be set explicitly
+endif()
+
+# Architectures used when no local GPU can be queried.  The trailing
+# "90-virtual" embeds PTX so newer cards (Blackwell and later) still JIT.
+set(GAEL_CUDA_ARCHITECTURES_FALLBACK 75-real 80-real 86-real 89-real 90-real 90-virtual
+    CACHE STRING "CUDA architectures used when the local GPU cannot be detected")
+
 if(GAEL_ENABLE_CUDA)
-    enable_language(CUDA OPTIONAL)
+    include(CheckLanguage)
+    check_language(CUDA)            # unlike enable_language(... OPTIONAL) this never hard-errors
+
+    if(CMAKE_CUDA_COMPILER)
+        # -- Choose the architectures *before* enable_language/add_library, so
+        #    every CUDA target inherits them (CMP0104 forbids leaving it empty).
+        #    -DCMAKE_CUDA_ARCHITECTURES=... on the command line still wins.
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+            set(_gael_cuda_arch "")
+            find_program(GAEL_NVIDIA_SMI nvidia-smi)
+            if(GAEL_NVIDIA_SMI)
+                execute_process(
+                    COMMAND "${GAEL_NVIDIA_SMI}" --query-gpu=compute_cap --format=csv,noheader
+                    RESULT_VARIABLE _smi_rc
+                    OUTPUT_VARIABLE _smi_out
+                    ERROR_VARIABLE  _smi_err
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+                if(_smi_rc EQUAL 0)
+                    string(REPLACE "\n" ";" _smi_caps "${_smi_out}")
+                    foreach(_cap IN LISTS _smi_caps)
+                        string(STRIP "${_cap}" _cap)
+                        string(REPLACE "." "" _cap "${_cap}")   # "8.9" -> "89"
+                        if(_cap MATCHES "^[0-9]+$")
+                            list(APPEND _gael_cuda_arch "${_cap}-real")
+                        endif()
+                    endforeach()
+                    list(REMOVE_DUPLICATES _gael_cuda_arch)
+                endif()
+            endif()
+
+            if(_gael_cuda_arch)
+                message(STATUS "GAEL: building CUDA for the local GPU(s): ${_gael_cuda_arch}")
+            else()
+                set(_gael_cuda_arch ${GAEL_CUDA_ARCHITECTURES_FALLBACK})
+                message(STATUS "GAEL: no usable GPU detected (driver missing or mismatched) – "
+                               "building CUDA for ${_gael_cuda_arch}")
+            endif()
+
+            set(CMAKE_CUDA_ARCHITECTURES "${_gael_cuda_arch}"
+                CACHE STRING "CUDA architectures to generate code for")
+        endif()
+
+        enable_language(CUDA)
+    else()
+        message(STATUS "GAEL: no CUDA compiler found – building without the CUDA back-end")
+    endif()
 endif()
 find_package(CUDAToolkit QUIET)
 
@@ -187,6 +241,15 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/global_settings.json
 
 add_executable(mock_data_generator src/mock_data_generator.cpp)
 target_link_libraries(mock_data_generator PRIVATE GAELcore cxxopts::cxxopts)
+
+# ---------------------------------------------------------------------------
+# 8b. Tests (ctest)
+# ---------------------------------------------------------------------------
+option(GAEL_BUILD_TESTS "Register the ctest suite" ${PROJECT_IS_TOP_LEVEL})
+if(GAEL_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
 
 # ---------------------------------------------------------------------------
 # 9. Install & export

@@ -1,0 +1,1218 @@
+{
+ "description": "One good spectrum each from N distinct RVVD stars",
+ "instruments": [
+  "LAMOST/LRS",
+  "SDSS/BOSS"
+ ],
+ "cuts": {
+  "min_snr": 20.0,
+  "blue_required": 3900.0,
+  "red_required": 5200.0,
+  "star_teff_range": [
+   18000.0,
+   45000.0
+  ]
+ },
+ "cases": [
+  {
+   "star_id": "00395125-05ae-4e18-8350-36accbbaf454",
+   "spectra": [
+    {
+     "spectrum_id": "38dd7602-3a1c-4876-8f76-b9838246e446",
+     "star_id": "00395125-05ae-4e18-8350-36accbbaf454",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/00395125-05ae-4e18-8350-36accbbaf454/spectra/38dd7602-3a1c-4876-8f76-b9838246e446.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 69.82
+    }
+   ]
+  },
+  {
+   "star_id": "009b7e9d-e39c-4424-9e9d-3d329b1eda89",
+   "spectra": [
+    {
+     "spectrum_id": "07539ebc-08f3-4722-97f3-fede2c858942",
+     "star_id": "009b7e9d-e39c-4424-9e9d-3d329b1eda89",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/009b7e9d-e39c-4424-9e9d-3d329b1eda89/spectra/07539ebc-08f3-4722-97f3-fede2c858942.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 22.78
+    }
+   ]
+  },
+  {
+   "star_id": "00ae455d-04fc-4756-bf42-899d49a4d855",
+   "spectra": [
+    {
+     "spectrum_id": "5ab5bb29-e704-45bd-ba36-e55961c10229",
+     "star_id": "00ae455d-04fc-4756-bf42-899d49a4d855",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/00ae455d-04fc-4756-bf42-899d49a4d855/spectra/5ab5bb29-e704-45bd-ba36-e55961c10229.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 26.78
+    }
+   ]
+  },
+  {
+   "star_id": "00b017d3-a2dc-4268-a092-c75d614b71a0",
+   "spectra": [
+    {
+     "spectrum_id": "5b15212c-ec08-4521-9f6a-70be054e9574",
+     "star_id": "00b017d3-a2dc-4268-a092-c75d614b71a0",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/00b017d3-a2dc-4268-a092-c75d614b71a0/spectra/5b15212c-ec08-4521-9f6a-70be054e9574.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 25.08
+    }
+   ]
+  },
+  {
+   "star_id": "01a45c5a-1da6-432e-9257-1931485542bf",
+   "spectra": [
+    {
+     "spectrum_id": "23874bc8-52fe-454f-ba0a-0f18bfd561cc",
+     "star_id": "01a45c5a-1da6-432e-9257-1931485542bf",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/01a45c5a-1da6-432e-9257-1931485542bf/spectra/23874bc8-52fe-454f-ba0a-0f18bfd561cc.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 30.77
+    }
+   ]
+  },
+  {
+   "star_id": "022b2bb6-9a7f-4f9a-82ac-a3b9a2010c79",
+   "spectra": [
+    {
+     "spectrum_id": "2e39178b-b73e-4d80-a11f-18746de2c8e3",
+     "star_id": "022b2bb6-9a7f-4f9a-82ac-a3b9a2010c79",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/022b2bb6-9a7f-4f9a-82ac-a3b9a2010c79/spectra/2e39178b-b73e-4d80-a11f-18746de2c8e3.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 73.32
+    }
+   ]
+  },
+  {
+   "star_id": "0230d612-1c16-4d01-af7d-d8408e2488da",
+   "spectra": [
+    {
+     "spectrum_id": "203413a7-1254-4347-8fc9-1d430ea38fae",
+     "star_id": "0230d612-1c16-4d01-af7d-d8408e2488da",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0230d612-1c16-4d01-af7d-d8408e2488da/spectra/203413a7-1254-4347-8fc9-1d430ea38fae.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 35.41
+    }
+   ]
+  },
+  {
+   "star_id": "0242e509-cf2b-4faf-aa32-a2071233eafe",
+   "spectra": [
+    {
+     "spectrum_id": "0cedb06c-fb89-41bd-a227-3b116e7d7155",
+     "star_id": "0242e509-cf2b-4faf-aa32-a2071233eafe",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0242e509-cf2b-4faf-aa32-a2071233eafe/spectra/0cedb06c-fb89-41bd-a227-3b116e7d7155.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 23.13
+    }
+   ]
+  },
+  {
+   "star_id": "0278488c-1843-436b-81b7-01d65dedd6d9",
+   "spectra": [
+    {
+     "spectrum_id": "6af3dce5-c60d-4cec-81c5-8afc83218091",
+     "star_id": "0278488c-1843-436b-81b7-01d65dedd6d9",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0278488c-1843-436b-81b7-01d65dedd6d9/spectra/6af3dce5-c60d-4cec-81c5-8afc83218091.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 25.66
+    }
+   ]
+  },
+  {
+   "star_id": "027ce2b7-b8b5-44ab-82f5-63eb5f1f8cc6",
+   "spectra": [
+    {
+     "spectrum_id": "8b4b6672-3e65-4647-a401-398d62e5671e",
+     "star_id": "027ce2b7-b8b5-44ab-82f5-63eb5f1f8cc6",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/027ce2b7-b8b5-44ab-82f5-63eb5f1f8cc6/spectra/8b4b6672-3e65-4647-a401-398d62e5671e.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 57.32
+    }
+   ]
+  },
+  {
+   "star_id": "02b4b017-a0f3-42aa-9cda-52d916d2a27d",
+   "spectra": [
+    {
+     "spectrum_id": "cee186ff-2a02-4154-8089-443d8d99aead",
+     "star_id": "02b4b017-a0f3-42aa-9cda-52d916d2a27d",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/02b4b017-a0f3-42aa-9cda-52d916d2a27d/spectra/cee186ff-2a02-4154-8089-443d8d99aead.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 23.74
+    }
+   ]
+  },
+  {
+   "star_id": "02d60046-18f7-49b3-8638-063200e4d7e4",
+   "spectra": [
+    {
+     "spectrum_id": "e175e2b8-e6b4-44b5-ab4b-f2dd0cb6867f",
+     "star_id": "02d60046-18f7-49b3-8638-063200e4d7e4",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/02d60046-18f7-49b3-8638-063200e4d7e4/spectra/e175e2b8-e6b4-44b5-ab4b-f2dd0cb6867f.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 44.5
+    }
+   ]
+  },
+  {
+   "star_id": "0388e05f-b2ec-4a6f-9889-0d8052ea54ad",
+   "spectra": [
+    {
+     "spectrum_id": "090f61ab-6389-4adc-a604-e803dfc4790d",
+     "star_id": "0388e05f-b2ec-4a6f-9889-0d8052ea54ad",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0388e05f-b2ec-4a6f-9889-0d8052ea54ad/spectra/090f61ab-6389-4adc-a604-e803dfc4790d.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 39.94
+    }
+   ]
+  },
+  {
+   "star_id": "03f27969-bba1-4154-a396-ec0d9763773b",
+   "spectra": [
+    {
+     "spectrum_id": "4ef3014b-5f15-4402-961f-e57890016e3a",
+     "star_id": "03f27969-bba1-4154-a396-ec0d9763773b",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/03f27969-bba1-4154-a396-ec0d9763773b/spectra/4ef3014b-5f15-4402-961f-e57890016e3a.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 21.2
+    }
+   ]
+  },
+  {
+   "star_id": "040f490e-1b4c-4d33-9146-fdfbe5148a13",
+   "spectra": [
+    {
+     "spectrum_id": "84379164-d640-4815-94db-8b8556d0ec0f",
+     "star_id": "040f490e-1b4c-4d33-9146-fdfbe5148a13",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/040f490e-1b4c-4d33-9146-fdfbe5148a13/spectra/84379164-d640-4815-94db-8b8556d0ec0f.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 35.86
+    }
+   ]
+  },
+  {
+   "star_id": "04ac281f-5a09-4598-b36b-f8eefe7b2598",
+   "spectra": [
+    {
+     "spectrum_id": "61982f41-bc2e-4e42-8e3c-d8141f2138e8",
+     "star_id": "04ac281f-5a09-4598-b36b-f8eefe7b2598",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/04ac281f-5a09-4598-b36b-f8eefe7b2598/spectra/61982f41-bc2e-4e42-8e3c-d8141f2138e8.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 23.38
+    }
+   ]
+  },
+  {
+   "star_id": "04cbbaf4-aad9-413f-9302-a67fa147e743",
+   "spectra": [
+    {
+     "spectrum_id": "28c4f465-7c48-4919-8c9b-44aecd31f65c",
+     "star_id": "04cbbaf4-aad9-413f-9302-a67fa147e743",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/04cbbaf4-aad9-413f-9302-a67fa147e743/spectra/28c4f465-7c48-4919-8c9b-44aecd31f65c.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 91.75
+    }
+   ]
+  },
+  {
+   "star_id": "04d681b9-d177-41c4-bf76-eed0ecc31cf8",
+   "spectra": [
+    {
+     "spectrum_id": "e3a88ba3-1578-447e-a46a-4c4bb5d6ae75",
+     "star_id": "04d681b9-d177-41c4-bf76-eed0ecc31cf8",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/04d681b9-d177-41c4-bf76-eed0ecc31cf8/spectra/e3a88ba3-1578-447e-a46a-4c4bb5d6ae75.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 22.36
+    }
+   ]
+  },
+  {
+   "star_id": "052cbd6c-3cbd-4c59-87a4-778f6020ad48",
+   "spectra": [
+    {
+     "spectrum_id": "0e8db8f5-13f0-4a42-a027-e2d2d7f16af9",
+     "star_id": "052cbd6c-3cbd-4c59-87a4-778f6020ad48",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/052cbd6c-3cbd-4c59-87a4-778f6020ad48/spectra/0e8db8f5-13f0-4a42-a027-e2d2d7f16af9.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 28.15
+    }
+   ]
+  },
+  {
+   "star_id": "05304768-881e-44aa-a2dd-d3b818176dc9",
+   "spectra": [
+    {
+     "spectrum_id": "0912ed99-ed44-4ba3-96ac-370bdbe26d16",
+     "star_id": "05304768-881e-44aa-a2dd-d3b818176dc9",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/05304768-881e-44aa-a2dd-d3b818176dc9/spectra/0912ed99-ed44-4ba3-96ac-370bdbe26d16.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 27.73
+    }
+   ]
+  },
+  {
+   "star_id": "059b336d-736b-4185-8133-4bf147564009",
+   "spectra": [
+    {
+     "spectrum_id": "24f0c40a-104e-465d-96a8-f25067ebe4d1",
+     "star_id": "059b336d-736b-4185-8133-4bf147564009",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/059b336d-736b-4185-8133-4bf147564009/spectra/24f0c40a-104e-465d-96a8-f25067ebe4d1.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 39.74
+    }
+   ]
+  },
+  {
+   "star_id": "06916118-3dc2-4a4b-822a-a4021fd0d815",
+   "spectra": [
+    {
+     "spectrum_id": "2877d0fb-c4e0-4e20-b5b0-b92a5a8bb9ac",
+     "star_id": "06916118-3dc2-4a4b-822a-a4021fd0d815",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/06916118-3dc2-4a4b-822a-a4021fd0d815/spectra/2877d0fb-c4e0-4e20-b5b0-b92a5a8bb9ac.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 20.13
+    }
+   ]
+  },
+  {
+   "star_id": "06a1963a-b24a-40a5-b4ed-dd90ef28284f",
+   "spectra": [
+    {
+     "spectrum_id": "9dd53361-c045-468c-8e80-3f565489d26d",
+     "star_id": "06a1963a-b24a-40a5-b4ed-dd90ef28284f",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/06a1963a-b24a-40a5-b4ed-dd90ef28284f/spectra/9dd53361-c045-468c-8e80-3f565489d26d.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 28.08
+    }
+   ]
+  },
+  {
+   "star_id": "074243ef-145b-471d-92b1-ad2f30d10ef5",
+   "spectra": [
+    {
+     "spectrum_id": "2f4f874f-50a1-495e-a397-89269bce22a3",
+     "star_id": "074243ef-145b-471d-92b1-ad2f30d10ef5",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/074243ef-145b-471d-92b1-ad2f30d10ef5/spectra/2f4f874f-50a1-495e-a397-89269bce22a3.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 33.87
+    }
+   ]
+  },
+  {
+   "star_id": "083962ba-d769-4d39-ad72-096b4e046fdd",
+   "spectra": [
+    {
+     "spectrum_id": "1afda285-092c-4ce9-812d-d748ff343ab2",
+     "star_id": "083962ba-d769-4d39-ad72-096b4e046fdd",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/083962ba-d769-4d39-ad72-096b4e046fdd/spectra/1afda285-092c-4ce9-812d-d748ff343ab2.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 27.8
+    }
+   ]
+  },
+  {
+   "star_id": "08bc09cb-5f51-4226-8579-cbb0623dc6b5",
+   "spectra": [
+    {
+     "spectrum_id": "1e7c5b26-b8e6-4a99-af83-719bb48e0340",
+     "star_id": "08bc09cb-5f51-4226-8579-cbb0623dc6b5",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/08bc09cb-5f51-4226-8579-cbb0623dc6b5/spectra/1e7c5b26-b8e6-4a99-af83-719bb48e0340.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 21.07
+    }
+   ]
+  },
+  {
+   "star_id": "08df4a73-5715-4884-8fbf-e233af14c82e",
+   "spectra": [
+    {
+     "spectrum_id": "3a8e6537-d103-410e-b975-5e8d81503623",
+     "star_id": "08df4a73-5715-4884-8fbf-e233af14c82e",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/08df4a73-5715-4884-8fbf-e233af14c82e/spectra/3a8e6537-d103-410e-b975-5e8d81503623.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 22.9
+    }
+   ]
+  },
+  {
+   "star_id": "091edd03-ac81-47ca-a332-3a912c575012",
+   "spectra": [
+    {
+     "spectrum_id": "ed91a8c1-875b-4ca8-a56d-887f9ac714ba",
+     "star_id": "091edd03-ac81-47ca-a332-3a912c575012",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/091edd03-ac81-47ca-a332-3a912c575012/spectra/ed91a8c1-875b-4ca8-a56d-887f9ac714ba.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 20.35
+    }
+   ]
+  },
+  {
+   "star_id": "09cd7cc0-d3ef-42f2-8cd4-df81a8c29f3a",
+   "spectra": [
+    {
+     "spectrum_id": "0db2854e-dfa5-4f0e-936e-8238751dfb28",
+     "star_id": "09cd7cc0-d3ef-42f2-8cd4-df81a8c29f3a",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/09cd7cc0-d3ef-42f2-8cd4-df81a8c29f3a/spectra/0db2854e-dfa5-4f0e-936e-8238751dfb28.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 49.39
+    }
+   ]
+  },
+  {
+   "star_id": "0a3e5e3d-5450-45ac-88f0-146c8e93a369",
+   "spectra": [
+    {
+     "spectrum_id": "bd9a05e0-689e-49e8-9689-fb73b8a6f549",
+     "star_id": "0a3e5e3d-5450-45ac-88f0-146c8e93a369",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0a3e5e3d-5450-45ac-88f0-146c8e93a369/spectra/bd9a05e0-689e-49e8-9689-fb73b8a6f549.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 23.43
+    }
+   ]
+  },
+  {
+   "star_id": "0a6a6a02-f3ae-4023-b6ee-2e6cceb9cccf",
+   "spectra": [
+    {
+     "spectrum_id": "13e53700-f943-426b-baab-826675e92405",
+     "star_id": "0a6a6a02-f3ae-4023-b6ee-2e6cceb9cccf",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0a6a6a02-f3ae-4023-b6ee-2e6cceb9cccf/spectra/13e53700-f943-426b-baab-826675e92405.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 20.11
+    }
+   ]
+  },
+  {
+   "star_id": "0abcf6ad-1714-4410-80ae-b4d6860de96c",
+   "spectra": [
+    {
+     "spectrum_id": "7f6421cf-98e3-4149-8a69-bb71d8969c8f",
+     "star_id": "0abcf6ad-1714-4410-80ae-b4d6860de96c",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0abcf6ad-1714-4410-80ae-b4d6860de96c/spectra/7f6421cf-98e3-4149-8a69-bb71d8969c8f.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 92.77
+    }
+   ]
+  },
+  {
+   "star_id": "0af54f1f-2682-4e4a-afbf-3a9ccebe9afc",
+   "spectra": [
+    {
+     "spectrum_id": "3e7d8ed9-8da1-4361-a523-62ce7cf3125c",
+     "star_id": "0af54f1f-2682-4e4a-afbf-3a9ccebe9afc",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0af54f1f-2682-4e4a-afbf-3a9ccebe9afc/spectra/3e7d8ed9-8da1-4361-a523-62ce7cf3125c.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 62.39
+    }
+   ]
+  },
+  {
+   "star_id": "0b3d562b-516a-4618-bb69-f3136bb1a23a",
+   "spectra": [
+    {
+     "spectrum_id": "f18a4a8b-f820-4a00-8877-4c883faaf795",
+     "star_id": "0b3d562b-516a-4618-bb69-f3136bb1a23a",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0b3d562b-516a-4618-bb69-f3136bb1a23a/spectra/f18a4a8b-f820-4a00-8877-4c883faaf795.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 38.05
+    }
+   ]
+  },
+  {
+   "star_id": "0b8eecac-e1b2-4b56-a4cc-3f25b05c72ec",
+   "spectra": [
+    {
+     "spectrum_id": "02806cec-3e43-4147-a3c9-ff9f01fe59cd",
+     "star_id": "0b8eecac-e1b2-4b56-a4cc-3f25b05c72ec",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0b8eecac-e1b2-4b56-a4cc-3f25b05c72ec/spectra/02806cec-3e43-4147-a3c9-ff9f01fe59cd.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 20.21
+    }
+   ]
+  },
+  {
+   "star_id": "0babfca9-15b5-4964-aef2-01ba7736f7e2",
+   "spectra": [
+    {
+     "spectrum_id": "c7041d7e-5d52-40d5-b742-1f43543e7371",
+     "star_id": "0babfca9-15b5-4964-aef2-01ba7736f7e2",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0babfca9-15b5-4964-aef2-01ba7736f7e2/spectra/c7041d7e-5d52-40d5-b742-1f43543e7371.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 22.29
+    }
+   ]
+  },
+  {
+   "star_id": "0bbfd058-a854-4a44-9965-5f3fe1ba6fb1",
+   "spectra": [
+    {
+     "spectrum_id": "58501650-5dd3-49fe-ab62-9f9f4af16b83",
+     "star_id": "0bbfd058-a854-4a44-9965-5f3fe1ba6fb1",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0bbfd058-a854-4a44-9965-5f3fe1ba6fb1/spectra/58501650-5dd3-49fe-ab62-9f9f4af16b83.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 20.1
+    }
+   ]
+  },
+  {
+   "star_id": "0bd8494c-53da-4d31-a460-5e938e461f51",
+   "spectra": [
+    {
+     "spectrum_id": "fcff7fb9-0af5-424d-890c-9d98b415c7f5",
+     "star_id": "0bd8494c-53da-4d31-a460-5e938e461f51",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0bd8494c-53da-4d31-a460-5e938e461f51/spectra/fcff7fb9-0af5-424d-890c-9d98b415c7f5.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 22.41
+    }
+   ]
+  },
+  {
+   "star_id": "0be945e1-b42d-4971-8513-734c27705600",
+   "spectra": [
+    {
+     "spectrum_id": "42ccedf6-d630-4477-9a2f-ec71d2f19f7d",
+     "star_id": "0be945e1-b42d-4971-8513-734c27705600",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0be945e1-b42d-4971-8513-734c27705600/spectra/42ccedf6-d630-4477-9a2f-ec71d2f19f7d.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 42.81
+    }
+   ]
+  },
+  {
+   "star_id": "0c1519c3-7200-4f22-b375-e55fdc691d49",
+   "spectra": [
+    {
+     "spectrum_id": "0dffb6bd-b228-4382-9d9c-12f258161ba2",
+     "star_id": "0c1519c3-7200-4f22-b375-e55fdc691d49",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0c1519c3-7200-4f22-b375-e55fdc691d49/spectra/0dffb6bd-b228-4382-9d9c-12f258161ba2.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 36.93
+    }
+   ]
+  },
+  {
+   "star_id": "0c5d4d2f-6a62-4d78-81b7-667593c216fc",
+   "spectra": [
+    {
+     "spectrum_id": "7c78e3bb-bb0e-43aa-82f2-2ecf0570c5da",
+     "star_id": "0c5d4d2f-6a62-4d78-81b7-667593c216fc",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0c5d4d2f-6a62-4d78-81b7-667593c216fc/spectra/7c78e3bb-bb0e-43aa-82f2-2ecf0570c5da.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 33.86
+    }
+   ]
+  },
+  {
+   "star_id": "0ca967e7-d51c-4995-aef8-567efc302e6a",
+   "spectra": [
+    {
+     "spectrum_id": "60626630-6d68-4a98-b25b-b46abe05493b",
+     "star_id": "0ca967e7-d51c-4995-aef8-567efc302e6a",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0ca967e7-d51c-4995-aef8-567efc302e6a/spectra/60626630-6d68-4a98-b25b-b46abe05493b.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 35.15
+    }
+   ]
+  },
+  {
+   "star_id": "0d79a50c-0ed7-4571-a149-d10a36bc191c",
+   "spectra": [
+    {
+     "spectrum_id": "e4c5b8e0-cbdf-4944-8f55-af4dabc3a5f3",
+     "star_id": "0d79a50c-0ed7-4571-a149-d10a36bc191c",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0d79a50c-0ed7-4571-a149-d10a36bc191c/spectra/e4c5b8e0-cbdf-4944-8f55-af4dabc3a5f3.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 26.29
+    }
+   ]
+  },
+  {
+   "star_id": "0d942e9d-047a-4826-88e5-b04555b44bff",
+   "spectra": [
+    {
+     "spectrum_id": "6f4d72ea-6573-4e6f-a03c-d6912721967d",
+     "star_id": "0d942e9d-047a-4826-88e5-b04555b44bff",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0d942e9d-047a-4826-88e5-b04555b44bff/spectra/6f4d72ea-6573-4e6f-a03c-d6912721967d.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 21.57
+    }
+   ]
+  },
+  {
+   "star_id": "0e495028-598a-4a07-8ca8-4e74df50ff64",
+   "spectra": [
+    {
+     "spectrum_id": "575f2b2e-32e9-41e5-9aaf-f75f7fe07285",
+     "star_id": "0e495028-598a-4a07-8ca8-4e74df50ff64",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0e495028-598a-4a07-8ca8-4e74df50ff64/spectra/575f2b2e-32e9-41e5-9aaf-f75f7fe07285.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 53.7
+    }
+   ]
+  },
+  {
+   "star_id": "0e61a841-7689-4dc2-973f-df7d2b3a6ea7",
+   "spectra": [
+    {
+     "spectrum_id": "26bf8768-9f8f-4362-b551-f7e2f35686a2",
+     "star_id": "0e61a841-7689-4dc2-973f-df7d2b3a6ea7",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0e61a841-7689-4dc2-973f-df7d2b3a6ea7/spectra/26bf8768-9f8f-4362-b551-f7e2f35686a2.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 156.79
+    }
+   ]
+  },
+  {
+   "star_id": "0e86f577-a629-4bfe-a9b9-55efec02cbb4",
+   "spectra": [
+    {
+     "spectrum_id": "4f9dd062-c58c-44b0-8395-79ec5f36c5a7",
+     "star_id": "0e86f577-a629-4bfe-a9b9-55efec02cbb4",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0e86f577-a629-4bfe-a9b9-55efec02cbb4/spectra/4f9dd062-c58c-44b0-8395-79ec5f36c5a7.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 25.42
+    }
+   ]
+  },
+  {
+   "star_id": "0eb81ba0-1f35-48ed-9956-bf32d9ebbb0f",
+   "spectra": [
+    {
+     "spectrum_id": "0435ce0d-08ea-40aa-b2f8-9f03d6b12bd0",
+     "star_id": "0eb81ba0-1f35-48ed-9956-bf32d9ebbb0f",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0eb81ba0-1f35-48ed-9956-bf32d9ebbb0f/spectra/0435ce0d-08ea-40aa-b2f8-9f03d6b12bd0.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 20.4
+    }
+   ]
+  },
+  {
+   "star_id": "0ee9119c-3994-461b-84d1-e8d9cd1d6a4f",
+   "spectra": [
+    {
+     "spectrum_id": "150df583-b839-4cd7-85a7-c22f115f7e7d",
+     "star_id": "0ee9119c-3994-461b-84d1-e8d9cd1d6a4f",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0ee9119c-3994-461b-84d1-e8d9cd1d6a4f/spectra/150df583-b839-4cd7-85a7-c22f115f7e7d.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 21.01
+    }
+   ]
+  },
+  {
+   "star_id": "0f10254d-0118-48be-abc3-0442c1997307",
+   "spectra": [
+    {
+     "spectrum_id": "682fd3d5-4ffa-4549-b5cc-380f3252fc71",
+     "star_id": "0f10254d-0118-48be-abc3-0442c1997307",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0f10254d-0118-48be-abc3-0442c1997307/spectra/682fd3d5-4ffa-4549-b5cc-380f3252fc71.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 22.08
+    }
+   ]
+  },
+  {
+   "star_id": "0f169dc1-c1cf-4deb-a611-ab4b679aedff",
+   "spectra": [
+    {
+     "spectrum_id": "1f68d7ca-d911-40da-9552-80e5ca32d9d4",
+     "star_id": "0f169dc1-c1cf-4deb-a611-ab4b679aedff",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0f169dc1-c1cf-4deb-a611-ab4b679aedff/spectra/1f68d7ca-d911-40da-9552-80e5ca32d9d4.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 20.49
+    }
+   ]
+  },
+  {
+   "star_id": "0f683b46-9dc7-406c-98da-e0a8036f5bb3",
+   "spectra": [
+    {
+     "spectrum_id": "907d55e5-3d3f-4fd1-bf9b-8b74f7d5615e",
+     "star_id": "0f683b46-9dc7-406c-98da-e0a8036f5bb3",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0f683b46-9dc7-406c-98da-e0a8036f5bb3/spectra/907d55e5-3d3f-4fd1-bf9b-8b74f7d5615e.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 20.42
+    }
+   ]
+  },
+  {
+   "star_id": "0fea17bf-13cf-46b5-b8dc-2adfd3116cc9",
+   "spectra": [
+    {
+     "spectrum_id": "1a74202c-ff8d-4356-8608-0384059f9a21",
+     "star_id": "0fea17bf-13cf-46b5-b8dc-2adfd3116cc9",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/0fea17bf-13cf-46b5-b8dc-2adfd3116cc9/spectra/1a74202c-ff8d-4356-8608-0384059f9a21.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 20.85
+    }
+   ]
+  },
+  {
+   "star_id": "109849dd-d11d-4fba-b969-234873f781b1",
+   "spectra": [
+    {
+     "spectrum_id": "7a4ab33a-0583-4fb6-9587-5c672cfa6acb",
+     "star_id": "109849dd-d11d-4fba-b969-234873f781b1",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/109849dd-d11d-4fba-b969-234873f781b1/spectra/7a4ab33a-0583-4fb6-9587-5c672cfa6acb.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 34.81
+    }
+   ]
+  },
+  {
+   "star_id": "10a5086f-d40c-4de8-8318-5ec4bf2fdbf2",
+   "spectra": [
+    {
+     "spectrum_id": "53b9fdad-0f38-4e2c-add1-73bea022c4f0",
+     "star_id": "10a5086f-d40c-4de8-8318-5ec4bf2fdbf2",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/10a5086f-d40c-4de8-8318-5ec4bf2fdbf2/spectra/53b9fdad-0f38-4e2c-add1-73bea022c4f0.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 49.67
+    }
+   ]
+  },
+  {
+   "star_id": "119a00c5-4644-4b07-bfc3-75f575d46eae",
+   "spectra": [
+    {
+     "spectrum_id": "1a39d5b1-4a90-419b-95ba-9545f74f84e8",
+     "star_id": "119a00c5-4644-4b07-bfc3-75f575d46eae",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/119a00c5-4644-4b07-bfc3-75f575d46eae/spectra/1a39d5b1-4a90-419b-95ba-9545f74f84e8.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 28.68
+    }
+   ]
+  },
+  {
+   "star_id": "11e2c9c6-62e9-4387-8d73-75efb5995e10",
+   "spectra": [
+    {
+     "spectrum_id": "b889c6ae-a1f9-4a14-a759-923c03d0c46e",
+     "star_id": "11e2c9c6-62e9-4387-8d73-75efb5995e10",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/11e2c9c6-62e9-4387-8d73-75efb5995e10/spectra/b889c6ae-a1f9-4a14-a759-923c03d0c46e.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 98.81
+    }
+   ]
+  },
+  {
+   "star_id": "11fe0fd9-eab2-40cf-a6be-55f226899794",
+   "spectra": [
+    {
+     "spectrum_id": "3a218880-70f0-4151-87bc-4c144e17787c",
+     "star_id": "11fe0fd9-eab2-40cf-a6be-55f226899794",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/11fe0fd9-eab2-40cf-a6be-55f226899794/spectra/3a218880-70f0-4151-87bc-4c144e17787c.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 51.27
+    }
+   ]
+  },
+  {
+   "star_id": "12b1ff77-5d9d-4b2d-9f29-65396a61eeb9",
+   "spectra": [
+    {
+     "spectrum_id": "5b5b2a26-5d0c-4a51-8acc-f87387ca48af",
+     "star_id": "12b1ff77-5d9d-4b2d-9f29-65396a61eeb9",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/12b1ff77-5d9d-4b2d-9f29-65396a61eeb9/spectra/5b5b2a26-5d0c-4a51-8acc-f87387ca48af.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 23.27
+    }
+   ]
+  },
+  {
+   "star_id": "12bb1854-d148-44d3-b1e3-093c7efb10ac",
+   "spectra": [
+    {
+     "spectrum_id": "7dd230e8-554b-46cb-ae49-2dadd025441e",
+     "star_id": "12bb1854-d148-44d3-b1e3-093c7efb10ac",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/12bb1854-d148-44d3-b1e3-093c7efb10ac/spectra/7dd230e8-554b-46cb-ae49-2dadd025441e.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 30.54
+    }
+   ]
+  },
+  {
+   "star_id": "12fc60c6-b60c-40ee-bd3f-555532c280b1",
+   "spectra": [
+    {
+     "spectrum_id": "13009899-da63-4872-a3ed-64a0a87187b1",
+     "star_id": "12fc60c6-b60c-40ee-bd3f-555532c280b1",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/12fc60c6-b60c-40ee-bd3f-555532c280b1/spectra/13009899-da63-4872-a3ed-64a0a87187b1.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 22.44
+    }
+   ]
+  },
+  {
+   "star_id": "131b64ff-9953-4f7f-8617-52ad4c41b387",
+   "spectra": [
+    {
+     "spectrum_id": "432005dc-ef5d-4f5f-b19b-c911efb518cf",
+     "star_id": "131b64ff-9953-4f7f-8617-52ad4c41b387",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/131b64ff-9953-4f7f-8617-52ad4c41b387/spectra/432005dc-ef5d-4f5f-b19b-c911efb518cf.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 30.0
+    }
+   ]
+  },
+  {
+   "star_id": "1338e1e2-048c-4d0e-8050-9bd61e5dd904",
+   "spectra": [
+    {
+     "spectrum_id": "50b672f8-8d70-42fe-a103-b6665787f062",
+     "star_id": "1338e1e2-048c-4d0e-8050-9bd61e5dd904",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/1338e1e2-048c-4d0e-8050-9bd61e5dd904/spectra/50b672f8-8d70-42fe-a103-b6665787f062.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 28.46
+    }
+   ]
+  },
+  {
+   "star_id": "134860f0-b950-40a6-bc8b-0d8041117692",
+   "spectra": [
+    {
+     "spectrum_id": "9dc731f3-8175-4d34-bca5-9e1adec568b5",
+     "star_id": "134860f0-b950-40a6-bc8b-0d8041117692",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/134860f0-b950-40a6-bc8b-0d8041117692/spectra/9dc731f3-8175-4d34-bca5-9e1adec568b5.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 30.3
+    }
+   ]
+  },
+  {
+   "star_id": "135bdbc9-88e3-4694-8e78-58160d498896",
+   "spectra": [
+    {
+     "spectrum_id": "68dd5b4a-2da0-4024-a4ee-255ee0bf6c8b",
+     "star_id": "135bdbc9-88e3-4694-8e78-58160d498896",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/135bdbc9-88e3-4694-8e78-58160d498896/spectra/68dd5b4a-2da0-4024-a4ee-255ee0bf6c8b.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 24.51
+    }
+   ]
+  },
+  {
+   "star_id": "13ad8ca7-ac17-443a-bf52-d911aeaba633",
+   "spectra": [
+    {
+     "spectrum_id": "46f975ea-43e8-44e8-a0bd-51125d1edf68",
+     "star_id": "13ad8ca7-ac17-443a-bf52-d911aeaba633",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/13ad8ca7-ac17-443a-bf52-d911aeaba633/spectra/46f975ea-43e8-44e8-a0bd-51125d1edf68.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 40.79
+    }
+   ]
+  },
+  {
+   "star_id": "13c27552-25f7-40a6-90ad-78aaca5f7bc6",
+   "spectra": [
+    {
+     "spectrum_id": "184e30a5-7ddd-49a5-83e6-0beb9bdc766f",
+     "star_id": "13c27552-25f7-40a6-90ad-78aaca5f7bc6",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/13c27552-25f7-40a6-90ad-78aaca5f7bc6/spectra/184e30a5-7ddd-49a5-83e6-0beb9bdc766f.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 20.07
+    }
+   ]
+  },
+  {
+   "star_id": "1403b03d-4087-49f3-be25-7f2215c63e60",
+   "spectra": [
+    {
+     "spectrum_id": "a54a7a07-1f49-4767-8445-4123d48f5b33",
+     "star_id": "1403b03d-4087-49f3-be25-7f2215c63e60",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/1403b03d-4087-49f3-be25-7f2215c63e60/spectra/a54a7a07-1f49-4767-8445-4123d48f5b33.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 36.47
+    }
+   ]
+  },
+  {
+   "star_id": "14dc23e9-343d-4600-a7d1-5df12a288805",
+   "spectra": [
+    {
+     "spectrum_id": "61bfb706-98a0-4f67-b176-f7040006e857",
+     "star_id": "14dc23e9-343d-4600-a7d1-5df12a288805",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/14dc23e9-343d-4600-a7d1-5df12a288805/spectra/61bfb706-98a0-4f67-b176-f7040006e857.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 118.76
+    }
+   ]
+  },
+  {
+   "star_id": "14e36a86-b2aa-421a-be26-b3c5d872d2e1",
+   "spectra": [
+    {
+     "spectrum_id": "2ab8095c-e903-4eca-bda7-16f1b6e8c232",
+     "star_id": "14e36a86-b2aa-421a-be26-b3c5d872d2e1",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/14e36a86-b2aa-421a-be26-b3c5d872d2e1/spectra/2ab8095c-e903-4eca-bda7-16f1b6e8c232.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 99.86
+    }
+   ]
+  },
+  {
+   "star_id": "14f4cdc7-00ea-4028-90ef-083e3ee60189",
+   "spectra": [
+    {
+     "spectrum_id": "59194acc-8e30-4c49-85af-fabd2222d919",
+     "star_id": "14f4cdc7-00ea-4028-90ef-083e3ee60189",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/14f4cdc7-00ea-4028-90ef-083e3ee60189/spectra/59194acc-8e30-4c49-85af-fabd2222d919.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 141.11
+    }
+   ]
+  },
+  {
+   "star_id": "1511899a-d7f7-47cb-96b3-f5c48f848953",
+   "spectra": [
+    {
+     "spectrum_id": "a6ed99b0-91a6-44d0-8a8d-b6b59176db9a",
+     "star_id": "1511899a-d7f7-47cb-96b3-f5c48f848953",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/1511899a-d7f7-47cb-96b3-f5c48f848953/spectra/a6ed99b0-91a6-44d0-8a8d-b6b59176db9a.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 48.7
+    }
+   ]
+  },
+  {
+   "star_id": "152a972d-204a-45db-bfee-23fd7ec5a05c",
+   "spectra": [
+    {
+     "spectrum_id": "23516f1a-19dd-4852-94c9-df743e9d322a",
+     "star_id": "152a972d-204a-45db-bfee-23fd7ec5a05c",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/152a972d-204a-45db-bfee-23fd7ec5a05c/spectra/23516f1a-19dd-4852-94c9-df743e9d322a.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 39.12
+    }
+   ]
+  },
+  {
+   "star_id": "1562a942-3aac-483a-90de-818df6f03344",
+   "spectra": [
+    {
+     "spectrum_id": "7579b720-edf6-425e-ab87-ba4449a5ffe9",
+     "star_id": "1562a942-3aac-483a-90de-818df6f03344",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/1562a942-3aac-483a-90de-818df6f03344/spectra/7579b720-edf6-425e-ab87-ba4449a5ffe9.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 23.9
+    }
+   ]
+  },
+  {
+   "star_id": "157c4463-21ac-4bfe-8cab-50878beb90e9",
+   "spectra": [
+    {
+     "spectrum_id": "2859d450-1ab3-4212-84ca-304770a4b418",
+     "star_id": "157c4463-21ac-4bfe-8cab-50878beb90e9",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/157c4463-21ac-4bfe-8cab-50878beb90e9/spectra/2859d450-1ab3-4212-84ca-304770a4b418.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 23.1
+    }
+   ]
+  },
+  {
+   "star_id": "15993e2a-3512-4f2e-92cf-059d99f3db7d",
+   "spectra": [
+    {
+     "spectrum_id": "06385247-9012-4058-8410-96f47676036d",
+     "star_id": "15993e2a-3512-4f2e-92cf-059d99f3db7d",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/15993e2a-3512-4f2e-92cf-059d99f3db7d/spectra/06385247-9012-4058-8410-96f47676036d.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 101.11
+    }
+   ]
+  },
+  {
+   "star_id": "15b93cfc-0cdb-4d43-8d44-f2c38c2012ba",
+   "spectra": [
+    {
+     "spectrum_id": "1474d82c-cebc-4aea-8955-f9f4b3ae2706",
+     "star_id": "15b93cfc-0cdb-4d43-8d44-f2c38c2012ba",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/15b93cfc-0cdb-4d43-8d44-f2c38c2012ba/spectra/1474d82c-cebc-4aea-8955-f9f4b3ae2706.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 29.23
+    }
+   ]
+  },
+  {
+   "star_id": "15d5cbf8-d594-4413-a191-8499ef7ac243",
+   "spectra": [
+    {
+     "spectrum_id": "003504be-34ea-4899-be34-6bfd35d854ec",
+     "star_id": "15d5cbf8-d594-4413-a191-8499ef7ac243",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/15d5cbf8-d594-4413-a191-8499ef7ac243/spectra/003504be-34ea-4899-be34-6bfd35d854ec.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 23.28
+    }
+   ]
+  },
+  {
+   "star_id": "15ddca8b-9a1a-4441-b35e-7db295ddde56",
+   "spectra": [
+    {
+     "spectrum_id": "2111a4f7-8510-4b16-8449-c5db6079d436",
+     "star_id": "15ddca8b-9a1a-4441-b35e-7db295ddde56",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/15ddca8b-9a1a-4441-b35e-7db295ddde56/spectra/2111a4f7-8510-4b16-8449-c5db6079d436.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 23.33
+    }
+   ]
+  },
+  {
+   "star_id": "161676ff-5c7f-4f9a-bef5-198ce440c4a7",
+   "spectra": [
+    {
+     "spectrum_id": "3dbcabd3-328a-420e-88f6-16b2cbe28687",
+     "star_id": "161676ff-5c7f-4f9a-bef5-198ce440c4a7",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/161676ff-5c7f-4f9a-bef5-198ce440c4a7/spectra/3dbcabd3-328a-420e-88f6-16b2cbe28687.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 67.28
+    }
+   ]
+  },
+  {
+   "star_id": "16186284-44e6-4971-9cac-b6284d741e76",
+   "spectra": [
+    {
+     "spectrum_id": "27b3a063-96e1-410b-8eaa-b3cbf146b916",
+     "star_id": "16186284-44e6-4971-9cac-b6284d741e76",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/16186284-44e6-4971-9cac-b6284d741e76/spectra/27b3a063-96e1-410b-8eaa-b3cbf146b916.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 47.76
+    }
+   ]
+  },
+  {
+   "star_id": "16322841-9718-42ce-ab72-71889bb5db24",
+   "spectra": [
+    {
+     "spectrum_id": "a40fcd47-1ae4-4587-9bb3-3a7cc958d665",
+     "star_id": "16322841-9718-42ce-ab72-71889bb5db24",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/16322841-9718-42ce-ab72-71889bb5db24/spectra/a40fcd47-1ae4-4587-9bb3-3a7cc958d665.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 29.81
+    }
+   ]
+  },
+  {
+   "star_id": "167b4de2-1b98-48c5-9d2b-9d9d1d8deb6d",
+   "spectra": [
+    {
+     "spectrum_id": "20b1650e-6cc0-4840-a6f6-1f3934d23625",
+     "star_id": "167b4de2-1b98-48c5-9d2b-9d9d1d8deb6d",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/167b4de2-1b98-48c5-9d2b-9d9d1d8deb6d/spectra/20b1650e-6cc0-4840-a6f6-1f3934d23625.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 86.03
+    }
+   ]
+  },
+  {
+   "star_id": "1687f678-bc3c-4b6b-b195-6e6df4da5311",
+   "spectra": [
+    {
+     "spectrum_id": "24fe4259-4c7b-4bc8-8ab4-0abf16c7c0f4",
+     "star_id": "1687f678-bc3c-4b6b-b195-6e6df4da5311",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/1687f678-bc3c-4b6b-b195-6e6df4da5311/spectra/24fe4259-4c7b-4bc8-8ab4-0abf16c7c0f4.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 124.7
+    }
+   ]
+  },
+  {
+   "star_id": "16c809d1-d8fb-4132-aca8-eba4bd650894",
+   "spectra": [
+    {
+     "spectrum_id": "d6b21a6e-c45f-40b7-a041-f477878560b8",
+     "star_id": "16c809d1-d8fb-4132-aca8-eba4bd650894",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/16c809d1-d8fb-4132-aca8-eba4bd650894/spectra/d6b21a6e-c45f-40b7-a041-f477878560b8.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 41.62
+    }
+   ]
+  },
+  {
+   "star_id": "16ec833e-5bec-48f1-9226-83e809590f1f",
+   "spectra": [
+    {
+     "spectrum_id": "41529e21-b971-4a68-b1cb-7d9466379236",
+     "star_id": "16ec833e-5bec-48f1-9226-83e809590f1f",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/16ec833e-5bec-48f1-9226-83e809590f1f/spectra/41529e21-b971-4a68-b1cb-7d9466379236.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 33.47
+    }
+   ]
+  },
+  {
+   "star_id": "178b5360-d3a4-4572-8ae8-5a2fbdd083e0",
+   "spectra": [
+    {
+     "spectrum_id": "ee7c1b5b-181a-46f8-badb-20335769cd00",
+     "star_id": "178b5360-d3a4-4572-8ae8-5a2fbdd083e0",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/178b5360-d3a4-4572-8ae8-5a2fbdd083e0/spectra/ee7c1b5b-181a-46f8-badb-20335769cd00.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 23.12
+    }
+   ]
+  },
+  {
+   "star_id": "17be5ad9-b320-43c9-b2b2-1c611fadc063",
+   "spectra": [
+    {
+     "spectrum_id": "8deab5fb-7345-469d-a66b-2ffbc486d732",
+     "star_id": "17be5ad9-b320-43c9-b2b2-1c611fadc063",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/17be5ad9-b320-43c9-b2b2-1c611fadc063/spectra/8deab5fb-7345-469d-a66b-2ffbc486d732.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 112.78
+    }
+   ]
+  },
+  {
+   "star_id": "17db49cd-fd2c-4a77-b0cb-1a59265b7671",
+   "spectra": [
+    {
+     "spectrum_id": "08100b68-3226-40ed-85b8-0bfbacb5b28d",
+     "star_id": "17db49cd-fd2c-4a77-b0cb-1a59265b7671",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/17db49cd-fd2c-4a77-b0cb-1a59265b7671/spectra/08100b68-3226-40ed-85b8-0bfbacb5b28d.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 21.85
+    }
+   ]
+  },
+  {
+   "star_id": "1873f2c7-1b95-46f3-95fe-5eb1223047f0",
+   "spectra": [
+    {
+     "spectrum_id": "11c11eee-e8bc-4935-953a-63dd4182031b",
+     "star_id": "1873f2c7-1b95-46f3-95fe-5eb1223047f0",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/1873f2c7-1b95-46f3-95fe-5eb1223047f0/spectra/11c11eee-e8bc-4935-953a-63dd4182031b.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 23.43
+    }
+   ]
+  },
+  {
+   "star_id": "1879b12f-2a6d-4d12-9bca-1e3404081d83",
+   "spectra": [
+    {
+     "spectrum_id": "2245e11c-c60e-4735-ab4c-7b72b2f03b36",
+     "star_id": "1879b12f-2a6d-4d12-9bca-1e3404081d83",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/1879b12f-2a6d-4d12-9bca-1e3404081d83/spectra/2245e11c-c60e-4735-ab4c-7b72b2f03b36.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 44.16
+    }
+   ]
+  },
+  {
+   "star_id": "18cb8811-9502-40a3-bbb4-f412abd246f5",
+   "spectra": [
+    {
+     "spectrum_id": "09f64d25-e923-4153-bb53-6112a6df83cc",
+     "star_id": "18cb8811-9502-40a3-bbb4-f412abd246f5",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/18cb8811-9502-40a3-bbb4-f412abd246f5/spectra/09f64d25-e923-4153-bb53-6112a6df83cc.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 20.54
+    }
+   ]
+  },
+  {
+   "star_id": "18fcae5f-b634-4e63-bc46-b7dc52a56d53",
+   "spectra": [
+    {
+     "spectrum_id": "691cb106-de22-4562-b824-f68343d41c76",
+     "star_id": "18fcae5f-b634-4e63-bc46-b7dc52a56d53",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/18fcae5f-b634-4e63-bc46-b7dc52a56d53/spectra/691cb106-de22-4562-b824-f68343d41c76.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 34.44
+    }
+   ]
+  },
+  {
+   "star_id": "1911fda9-96f5-4aa5-b7b0-a70a667670d0",
+   "spectra": [
+    {
+     "spectrum_id": "1398ff92-3045-4f7c-81d0-2045beb93c3b",
+     "star_id": "1911fda9-96f5-4aa5-b7b0-a70a667670d0",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/1911fda9-96f5-4aa5-b7b0-a70a667670d0/spectra/1398ff92-3045-4f7c-81d0-2045beb93c3b.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 22.02
+    }
+   ]
+  },
+  {
+   "star_id": "19662759-364b-4890-a4bc-1d9b9ed64114",
+   "spectra": [
+    {
+     "spectrum_id": "0bcca84d-9ce3-4852-b08d-0574d15f58fb",
+     "star_id": "19662759-364b-4890-a4bc-1d9b9ed64114",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/19662759-364b-4890-a4bc-1d9b9ed64114/spectra/0bcca84d-9ce3-4852-b08d-0574d15f58fb.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 182.38
+    }
+   ]
+  },
+  {
+   "star_id": "196b5554-fd85-4722-b47f-d134cab1d0c9",
+   "spectra": [
+    {
+     "spectrum_id": "b6afde62-90bd-498a-8a3e-7571a75c4d41",
+     "star_id": "196b5554-fd85-4722-b47f-d134cab1d0c9",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/196b5554-fd85-4722-b47f-d134cab1d0c9/spectra/b6afde62-90bd-498a-8a3e-7571a75c4d41.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 34.05
+    }
+   ]
+  },
+  {
+   "star_id": "199853ac-af42-4a3a-b085-53acf89340bf",
+   "spectra": [
+    {
+     "spectrum_id": "e8e4332a-3916-484a-a871-54c5cd3e62bf",
+     "star_id": "199853ac-af42-4a3a-b085-53acf89340bf",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/199853ac-af42-4a3a-b085-53acf89340bf/spectra/e8e4332a-3916-484a-a871-54c5cd3e62bf.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 34.45
+    }
+   ]
+  },
+  {
+   "star_id": "199b7082-8a0b-412c-bf8c-0f941d188196",
+   "spectra": [
+    {
+     "spectrum_id": "e056ff4b-9090-4936-926a-276b4bc0dabf",
+     "star_id": "199b7082-8a0b-412c-bf8c-0f941d188196",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/199b7082-8a0b-412c-bf8c-0f941d188196/spectra/e056ff4b-9090-4936-926a-276b4bc0dabf.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 64.06
+    }
+   ]
+  },
+  {
+   "star_id": "19a8a185-2b40-4300-b5d7-fb07295b1698",
+   "spectra": [
+    {
+     "spectrum_id": "e611d8f7-50c1-44da-8dbd-5380c0d4824c",
+     "star_id": "19a8a185-2b40-4300-b5d7-fb07295b1698",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/19a8a185-2b40-4300-b5d7-fb07295b1698/spectra/e611d8f7-50c1-44da-8dbd-5380c0d4824c.asd",
+     "instrument": "SDSS/BOSS",
+     "snr": 20.33
+    }
+   ]
+  },
+  {
+   "star_id": "19db5a11-9edd-4903-96ee-1c7dbf3c5e0c",
+   "spectra": [
+    {
+     "spectrum_id": "05a88426-1020-4ff5-b110-884f8df43adc",
+     "star_id": "19db5a11-9edd-4903-96ee-1c7dbf3c5e0c",
+     "data_file": "/home/fabian/data/ASTRA/data/stars/19db5a11-9edd-4903-96ee-1c7dbf3c5e0c/spectra/05a88426-1020-4ff5-b110-884f8df43adc.asd",
+     "instrument": "LAMOST/LRS",
+     "snr": 32.89
+    }
+   ]
+  }
+ ]
+}

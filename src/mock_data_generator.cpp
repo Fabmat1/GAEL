@@ -155,10 +155,16 @@ struct MockDataConfig {
     // Grid selection
     std::string grid_path = "sdB/processed/";
     std::string output_dir = "./mock_data/";
-    
+
     // Additional options
     bool verbose = false;
     int num_threads = 1;
+
+    // RNG seed.  0 keeps the historical behaviour (std::random_device, i.e. a
+    // different data set on every invocation).  Any non-zero value makes the
+    // whole generation reproducible *and* independent of num_threads, which is
+    // what the GAEL-vs-ISIS regression tests rely on for caching.
+    unsigned seed = 0;
 
     // Initial guess configuration for fitting
     struct InitialGuess {
@@ -385,12 +391,20 @@ void generation_worker(
     int end_idx
 ) {
     std::random_device rd;
-    std::mt19937 rng(rd() + thread_id);  // Different seed per thread
+    const bool deterministic = (config.seed != 0);
+    // Only used when config.seed == 0 (legacy, non-reproducible mode).
+    std::mt19937 shared_rng(rd() + thread_id);
     std::uniform_real_distribution<> noise_dist(config.noise_min, config.noise_max);
-    
+
     for(int set_idx = start_idx; set_idx < end_idx; ++set_idx) {
         if(progress.should_stop) break;
-        
+
+        // Seeding per *set* rather than per thread keeps the generated data
+        // identical no matter how the sets are distributed over threads.
+        std::mt19937 per_set_rng(config.seed +
+                                 0x9E3779B9u * static_cast<unsigned>(set_idx + 1));
+        std::mt19937& rng = deterministic ? per_set_rng : shared_rng;
+
         // Create directory for this parameter set
         std::stringstream ss;
         ss << config.output_dir << "/" 
@@ -576,6 +590,7 @@ MockDataConfig load_config_from_json(const std::string& filename) {
     if (j.contains("grid_path")) config.grid_path = j["grid_path"];
     if (j.contains("output_dir")) config.output_dir = j["output_dir"];
     if (j.contains("num_threads")) config.num_threads = j["num_threads"];
+    if (j.contains("seed")) config.seed = j["seed"];
     
     // Load wavelength sampling mode
     if (j.contains("use_nyquist_sampling")) {
@@ -647,7 +662,9 @@ int main(int argc, char** argv) {
         ("init-logg", "Initial logg guess (value,freeze)", cxxopts::value<std::string>()->default_value("5.5,false"))
         ("init-xi", "Initial xi guess (value,freeze)", cxxopts::value<std::string>()->default_value("0,true"))
         ("init-z", "Initial z guess (value,freeze)", cxxopts::value<std::string>()->default_value("0,true"))
-        ("init-he", "Initial HE guess (value,freeze)", cxxopts::value<std::string>()->default_value("-2,false"));
+        ("init-he", "Initial HE guess (value,freeze)", cxxopts::value<std::string>()->default_value("-2,false"))
+        ("seed", "RNG seed: 0 = random (default), non-zero = fully reproducible",
+         cxxopts::value<unsigned>()->default_value("0"))
         ("h,help", "Print usage");
     
     auto result = options.parse(argc, argv);
@@ -751,7 +768,9 @@ int main(int argc, char** argv) {
     }
     
     config.verbose = result["verbose"].as<bool>();
-    
+    // An explicit --seed overrides whatever the config file said.
+    if (result.count("seed")) config.seed = result["seed"].as<unsigned>();
+
     // Print configuration summary
     std::cout << "\n=== Mock Data Generation Configuration ===\n";
     std::cout << "Parameter sets: " << config.num_parameter_sets << "\n";
@@ -774,6 +793,8 @@ int main(int argc, char** argv) {
     std::cout << "\nGrid: " << config.grid_path << "\n";
     std::cout << "Output: " << config.output_dir << "\n";
     std::cout << "Threads: " << config.num_threads << "\n";
+    std::cout << "Seed: " << config.seed
+              << (config.seed ? " (reproducible)" : " (random)") << "\n";
     std::cout << "==========================================\n\n";
     
     // Load base paths from global config
@@ -792,8 +813,8 @@ int main(int argc, char** argv) {
     // Generate parameter sets
     std::cout << "Generating parameter sets...\n";
     std::random_device rd;
-    std::mt19937 rng(rd());
-    
+    std::mt19937 rng(config.seed != 0 ? config.seed : rd());
+
     std::vector<StellarParams> param_sets;
     std::vector<int> multiplicities;
     

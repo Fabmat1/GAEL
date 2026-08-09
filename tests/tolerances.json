@@ -1,0 +1,121 @@
+{
+ "_comment": "Calibrated GAEL-vs-ISIS agreement thresholds. Regenerate with tests/test_*_vs_isis.py --calibrate. bias/scatter are in the parameter's own unit (K, dex, km/s).",
+ "suites": {
+  "mock_multi": {
+   "min_clean_cases": 70,
+   "parameters": {
+    "he": {
+     "max_abs_bias": 0.0058,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 0.015,
+     "min_n": 60
+    },
+    "logg": {
+     "max_abs_bias": 0.011,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 0.015,
+     "min_n": 60
+    },
+    "teff": {
+     "max_abs_bias": 40.0,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 110.0,
+     "min_n": 60
+    },
+    "vrad": {
+     "max_abs_bias": 0.71,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 2.8,
+     "min_n": 300
+    }
+   }
+  },
+  "mock_single": {
+   "min_clean_cases": 70,
+   "parameters": {
+    "he": {
+     "max_abs_bias": 0.01,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 0.041,
+     "min_n": 60
+    },
+    "logg": {
+     "max_abs_bias": 0.0069,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 0.028,
+     "min_n": 60
+    },
+    "teff": {
+     "max_abs_bias": 54.0,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 220.0,
+     "min_n": 60
+    },
+    "vrad": {
+     "max_abs_bias": 0.99,
+     "max_outlier_fraction": 0.07,
+     "max_scatter": 2.7,
+     "min_n": 60
+    }
+   }
+  },
+  "real_multi": {
+   "min_clean_cases": 70,
+   "parameters": {
+    "he": {
+     "max_abs_bias": 0.02,
+     "max_outlier_fraction": 0.158,
+     "max_scatter": 0.078,
+     "min_n": 56
+    },
+    "logg": {
+     "max_abs_bias": 0.048,
+     "max_outlier_fraction": 0.073,
+     "max_scatter": 0.045,
+     "min_n": 56
+    },
+    "teff": {
+     "max_abs_bias": 390.0,
+     "max_outlier_fraction": 0.07,
+     "max_scatter": 800.0,
+     "min_n": 60
+    },
+    "vrad": {
+     "max_abs_bias": 2.1,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 8.2,
+     "min_n": 299
+    }
+   }
+  },
+  "real_single": {
+   "min_clean_cases": 70,
+   "parameters": {
+    "he": {
+     "max_abs_bias": 0.02,
+     "max_outlier_fraction": 0.243,
+     "max_scatter": 0.079,
+     "min_n": 56
+    },
+    "logg": {
+     "max_abs_bias": 0.057,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 0.086,
+     "min_n": 57
+    },
+    "teff": {
+     "max_abs_bias": 210.0,
+     "max_outlier_fraction": 0.071,
+     "max_scatter": 820.0,
+     "min_n": 58
+    },
+    "vrad": {
+     "max_abs_bias": 2.4,
+     "max_outlier_fraction": 0.07,
+     "max_scatter": 9.5,
+     "min_n": 60
+    }
+   }
+  }
+ }
+}
