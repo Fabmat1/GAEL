@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Analyze DIGGA fit results by comparing with true parameters from metadata.
+Analyze GAEL fit results by comparing with true parameters from metadata.
 """
 
 import json
@@ -29,7 +29,7 @@ PARAM_INFO = {
 
 logger = logging.getLogger(__name__)
 
-def setup_logging(log_file: str = "digga_analysis.log", level: str = "INFO"):
+def setup_logging(log_file: str = "gael_analysis.log", level: str = "INFO"):
     # Clear existing handlers to allow reconfiguration (useful in notebooks/tests)
     root = logging.getLogger()
     if root.handlers:
@@ -63,10 +63,10 @@ def setup_logging(log_file: str = "digga_analysis.log", level: str = "INFO"):
     ch.setFormatter(formatter)
     root.addHandler(ch)
 
-class DIGGAAnalyzer:
+class GAELAnalyzer:
     def __init__(self, data_dir='.', results_dir='fit_results', exclude_params=None):
         self.data_dir = Path(data_dir)
-        self.results_dir = self.data_dir / results_dir  # ← Fixed: now relative to data_dir
+        self.results_dir = Path(results_dir)
         self.data = defaultdict(list)
         self.exclude_params = set(exclude_params or [])
         
@@ -350,13 +350,13 @@ class DIGGAAnalyzer:
                 logger.exception(f"Error creating histogram for {param}")
         
         try:
-            plt.suptitle('DIGGA Fit Results Analysis', fontsize=16, y=0.995)
+            plt.suptitle('GAEL Fit Results Analysis', fontsize=16, y=0.995)
             plt.tight_layout()
         except Exception:
             logger.exception("Error finalizing figure layout")
         
         # Save figure
-        output_file = 'digga_analysis_results.png'
+        output_file = 'gael_analysis_results.png'
         try:
             plt.savefig(output_file, dpi=150, bbox_inches='tight')
             logger.info(f"Saved analysis plots to {output_file}")
@@ -376,9 +376,9 @@ class DIGGAAnalyzer:
     
     def save_statistics_summary(self):
         """Save summary statistics to a text file."""
-        summary_path = 'digga_analysis_summary.txt'
+        summary_path = 'gael_analysis_summary.txt'
         with open(summary_path, 'w') as f:
-            f.write("DIGGA Fit Analysis Summary\n")
+            f.write("GAEL Fit Analysis Summary\n")
             f.write("=" * 50 + "\n\n")
             
             if self.exclude_params:
@@ -407,21 +407,21 @@ class DIGGAAnalyzer:
         logger.info(f"Saved summary statistics to {summary_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Analyze DIGGA fit results')
+    parser = argparse.ArgumentParser(description='Analyze GAEL fit results')
     parser.add_argument('--start', type=int, default=1, help='Starting folder index (default: 1)')
     parser.add_argument('--end', type=int, required=True, help='Ending folder index')
     parser.add_argument('--data-dir', type=str, default='.', help='Directory containing mock data folders (default: .)')
     parser.add_argument('--results-dir', type=str, default='fit_results', help='Directory containing fit results (default: fit_results)')
     parser.add_argument('--exclude', nargs='*', default=[], 
                         help='Parameters to exclude from plots (e.g., --exclude teff logg)')
-    parser.add_argument('--log-file', type=str, default='digga_analysis.log', help='Log file path (default: digga_analysis.log)')
+    parser.add_argument('--log-file', type=str, default='gael_analysis.log', help='Log file path (default: gael_analysis.log)')
     parser.add_argument('--log-level', type=str, default='INFO', choices=['DEBUG','INFO','WARNING','ERROR','CRITICAL'],
                         help='Console log level (default: INFO)')
     
     args = parser.parse_args()
 
     setup_logging(log_file=args.log_file, level=args.log_level)
-    logger.info("Starting DIGGA analysis")
+    logger.info("Starting GAEL analysis")
     
     # Validate exclude parameters
     invalid_params = [p for p in args.exclude if p not in PARAM_INFO]
@@ -430,7 +430,7 @@ def main():
         logger.info(f"Valid parameters are: {list(PARAM_INFO.keys())}")
         args.exclude = [p for p in args.exclude if p in PARAM_INFO]
     
-    analyzer = DIGGAAnalyzer(args.data_dir, args.results_dir, args.exclude)
+    analyzer = GAELAnalyzer(args.data_dir, args.results_dir, args.exclude)
     try:
         analyzer.collect_all_data(args.start, args.end)
         analyzer.plot_scatter_histograms()

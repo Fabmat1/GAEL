@@ -9,5 +9,5 @@ cmake_install.cmake
 input/*
 XSHOOTER_mock.json
 *.log
-analyze_digga_results.py
+analyze_gael_results.py
 build_v0/

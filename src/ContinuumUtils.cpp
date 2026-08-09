@@ -29,9 +29,9 @@ Vector anchors_from_intervals(
      *  Default: only non-ignored (fit-window) points  ->  anchors live
      *  inside the fit window.  ISIS instead spans the full DATA range and
      *  adds exterior boundary anchors, giving a denser, edge-constrained
-     *  continuum.  DIGGA_ANCHORS_FULLRANGE=1 reproduces the ISIS behaviour
+     *  continuum.  GAEL_ANCHORS_FULLRANGE=1 reproduces the ISIS behaviour
      *  (clip anchors to the full data range, ignore the mask for bounds). */
-    const char* full_env = std::getenv("DIGGA_ANCHORS_FULLRANGE");
+    const char* full_env = std::getenv("GAEL_ANCHORS_FULLRANGE");
     const bool  full_range = full_env && std::string(full_env) == "1";
 
     std::vector<double> good_lambda;

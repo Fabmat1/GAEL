@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 cmake_policy(SET CMP0074 NEW)       # honour *_ROOT / CMAKE_PREFIX_PATH
 
-project(DIGGA LANGUAGES C CXX Fortran)
+project(GAEL LANGUAGES C CXX Fortran)
 
 if(POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
@@ -21,12 +21,12 @@ endif()
 # ---------------------------------------------------------------------------
 # 1. Build options
 # ---------------------------------------------------------------------------
-option(DIGGA_ENABLE_CUDA "Build CUDA back-end" ON)
+option(GAEL_ENABLE_CUDA "Build CUDA back-end" ON)
 
-option(DIGGA_LEGACY_CONVOLUTION "Use legacy spectral-resolution algorithm" OFF)
+option(GAEL_LEGACY_CONVOLUTION "Use legacy spectral-resolution algorithm" OFF)
 
-if(DIGGA_LEGACY_CONVOLUTION)
-    add_compile_definitions(DIGGA_LEGACY_CONVOLUTION)
+if(GAEL_LEGACY_CONVOLUTION)
+    add_compile_definitions(GAEL_LEGACY_CONVOLUTION)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ add_compile_options(
 # ---------------------------------------------------------------------------
 # 3. CUDA (optional)
 # ---------------------------------------------------------------------------
-if(DIGGA_ENABLE_CUDA)
+if(GAEL_ENABLE_CUDA)
     enable_language(CUDA OPTIONAL)
 endif()
 find_package(CUDAToolkit QUIET)
@@ -93,7 +93,7 @@ find_library(CFITSIO_LIB cfitsio  REQUIRED)
 # ---------------------------------------------------------------------------
 # 5. Core library (no Python, no matplotlib) – this is what ASTRA links
 # ---------------------------------------------------------------------------
-add_library(DIGGAcore
+add_library(GAELcore
     src/Spectrum.cpp
     src/SpectrumCache.cpp
     src/NyquistGrid.cpp
@@ -112,21 +112,21 @@ add_library(DIGGAcore
     src/Chi2Utils.cpp
     src/UnifiedFitWorkflow.cpp
     src/SpectrumLoaders.cpp
-    src/DiggaAPI.cpp
-    src/DiggaAPI_json.cpp       # JSON adapters (separate TU)
+    src/GaelAPI.cpp
+    src/GaelAPI_json.cpp       # JSON adapters (separate TU)
 )
-add_library(DIGGA::core ALIAS DIGGAcore)
+add_library(GAEL::core ALIAS GAELcore)
 
-target_include_directories(DIGGAcore
+target_include_directories(GAELcore
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE extern)
 
-target_compile_definitions(DIGGAcore PUBLIC
+target_compile_definitions(GAELcore PUBLIC
     EIGEN_USE_BLAS EIGEN_USE_LAPACKE)
 
-target_link_libraries(DIGGAcore PUBLIC
+target_link_libraries(GAELcore PUBLIC
     Eigen3::Eigen
     OpenBLAS::OpenBLAS
     ${CCFITS_LIB}
@@ -137,56 +137,56 @@ target_link_libraries(DIGGAcore PUBLIC
     unordered_dense::unordered_dense)
 
 if(OpenMP_CXX_FOUND)
-    target_link_libraries(DIGGAcore PUBLIC OpenMP::OpenMP_CXX)
+    target_link_libraries(GAELcore PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
 # ---------------------------------------------------------------------------
 # 6. Optional CUDA attach to core
 # ---------------------------------------------------------------------------
-if(DIGGA_ENABLE_CUDA AND CUDAToolkit_FOUND AND CMAKE_CUDA_COMPILER)
-    target_sources(DIGGAcore PRIVATE src/ResolutionCUDA.cu)
+if(GAEL_ENABLE_CUDA AND CUDAToolkit_FOUND AND CMAKE_CUDA_COMPILER)
+    target_sources(GAELcore PRIVATE src/ResolutionCUDA.cu)
     set_source_files_properties(src/ResolutionCUDA.cu PROPERTIES
         LANGUAGE CUDA CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON
         CUDA_SEPARABLE_COMPILATION ON)
-    target_compile_options(DIGGAcore PRIVATE
+    target_compile_options(GAELcore PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr
             --diag-suppress=20014 --diag-suppress=20015
             -Wno-deprecated-gpu-targets>)
-    target_compile_definitions(DIGGAcore PRIVATE DIGGA_USE_CUDA)
-    target_link_libraries(DIGGAcore PRIVATE CUDA::cudart)
+    target_compile_definitions(GAELcore PRIVATE GAEL_USE_CUDA)
+    target_link_libraries(GAELcore PRIVATE CUDA::cudart)
 endif()
 
 # ---------------------------------------------------------------------------
 # 7. Report library (LaTeX + matplotlib-cpp). Optional – ASTRA doesn't need it.
 # ---------------------------------------------------------------------------
-option(DIGGA_BUILD_REPORT "Build the PDF/plot reporting helpers" ON)
-if(DIGGA_BUILD_REPORT)
-    add_library(DIGGAreport src/ReportUtils.cpp)
-    add_library(DIGGA::report ALIAS DIGGAreport)
-    target_include_directories(DIGGAreport PRIVATE extern)
-    target_link_libraries(DIGGAreport
-        PUBLIC  DIGGAcore
+option(GAEL_BUILD_REPORT "Build the PDF/plot reporting helpers" ON)
+if(GAEL_BUILD_REPORT)
+    add_library(GAELreport src/ReportUtils.cpp)
+    add_library(GAEL::report ALIAS GAELreport)
+    target_include_directories(GAELreport PRIVATE extern)
+    target_link_libraries(GAELreport
+        PUBLIC  GAELcore
         PRIVATE Python3::Python Python3::NumPy)
-    target_compile_definitions(DIGGAreport PRIVATE
-        DIGGA_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/DIGGA\")
+    target_compile_definitions(GAELreport PRIVATE
+        GAEL_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/GAEL\")
 endif()
 
 # ---------------------------------------------------------------------------
 # 8. CLI executable
 # ---------------------------------------------------------------------------
-add_executable(DIGGA src/main.cpp)
-target_include_directories(DIGGA PRIVATE extern)
-target_link_libraries(DIGGA PRIVATE DIGGAcore cxxopts::cxxopts)
-if(DIGGA_BUILD_REPORT)
-    target_link_libraries(DIGGA PRIVATE DIGGAreport Python3::Python)
-    target_compile_definitions(DIGGA PRIVATE DIGGA_HAVE_REPORT)
+add_executable(GAEL src/main.cpp)
+target_include_directories(GAEL PRIVATE extern)
+target_link_libraries(GAEL PRIVATE GAELcore cxxopts::cxxopts)
+if(GAEL_BUILD_REPORT)
+    target_link_libraries(GAEL PRIVATE GAELreport Python3::Python)
+    target_compile_definitions(GAEL PRIVATE GAEL_HAVE_REPORT)
 endif()
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/global_settings.json
                ${CMAKE_CURRENT_BINARY_DIR}/global_settings.json COPYONLY)
 
 add_executable(mock_data_generator src/mock_data_generator.cpp)
-target_link_libraries(mock_data_generator PRIVATE DIGGAcore cxxopts::cxxopts)
+target_link_libraries(mock_data_generator PRIVATE GAELcore cxxopts::cxxopts)
 
 # ---------------------------------------------------------------------------
 # 9. Install & export
@@ -194,13 +194,13 @@ target_link_libraries(mock_data_generator PRIVATE DIGGAcore cxxopts::cxxopts)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(_digga_targets DIGGAcore)
-if(DIGGA_BUILD_REPORT)
-    list(APPEND _digga_targets DIGGAreport)
+set(_gael_targets GAELcore)
+if(GAEL_BUILD_REPORT)
+    list(APPEND _gael_targets GAELreport)
 endif()
 
-install(TARGETS ${_digga_targets} DIGGA mock_data_generator
-        EXPORT  DIGGATargets
+install(TARGETS ${_gael_targets} GAEL mock_data_generator
+        EXPORT  GAELTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -212,26 +212,26 @@ install(DIRECTORY include/
         FILES_MATCHING PATTERN "*.hpp")
 
 install(FILES global_settings.json DESTINATION ${CMAKE_INSTALL_BINDIR})
-if(DIGGA_BUILD_REPORT)
-    install(PROGRAMS src/DIGGA_multiplot.py
-            DESTINATION ${CMAKE_INSTALL_DATADIR}/DIGGA)
+if(GAEL_BUILD_REPORT)
+    install(PROGRAMS src/GAEL_multiplot.py
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/GAEL)
 endif()
 
-install(EXPORT DIGGATargets
-        FILE       DIGGATargets.cmake
-        NAMESPACE  DIGGA::
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIGGA)
+install(EXPORT GAELTargets
+        FILE       GAELTargets.cmake
+        NAMESPACE  GAEL::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/GAEL)
 
 configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/DIGGAConfig.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/DIGGAConfig.cmake
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIGGA)
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GAELConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/GAELConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/GAEL)
 
 write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/DIGGAConfigVersion.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/GAELConfigVersion.cmake
     VERSION 0.1.0 COMPATIBILITY SameMajorVersion)
 
 install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/DIGGAConfig.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/DIGGAConfigVersion.cmake
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIGGA)
+    ${CMAKE_CURRENT_BINARY_DIR}/GAELConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/GAELConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/GAEL)

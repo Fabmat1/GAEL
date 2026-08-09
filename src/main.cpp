@@ -1,5 +1,5 @@
 #include "specfit/CommonTypes.hpp"
-#include "specfit/DiggaAPI.hpp"
+#include "specfit/GaelAPI.hpp"
 #include "specfit/JsonUtils.hpp"
 #include "specfit/SpectrumCache.hpp"
 #include "specfit/SyntheticModel.hpp"
@@ -15,7 +15,7 @@
 #include <random>
 #include <utility>
 
-#ifdef DIGGA_HAVE_REPORT
+#ifdef GAEL_HAVE_REPORT
 #include "specfit/ReportUtils.hpp"
 #endif
 
@@ -27,7 +27,7 @@ namespace {
 
 /* ------------------------------------------------------------------ */
 /*  Reproduce the old ReportUtils fit_parameters.csv straight from     */
-/*  the FitResult — no DIGGAreport dependency.                         */
+/*  the FitResult — no GAELreport dependency.                         */
 /* ------------------------------------------------------------------ */
 void write_fit_parameters_csv(const std::string    &out_dir,
                               const api::FitResult &result) {
@@ -169,7 +169,7 @@ int run_synthetic_only(const api::FitInput &fi, const api::GlobalSettings &gs) {
 int main(int argc, char **argv) {
     auto t0 = std::chrono::steady_clock::now();
     try {
-        cxxopts::Options opts("DIGGA",
+        cxxopts::Options opts("GAEL",
                               "Multi-dataset stellar spectrum fitting");
         opts.add_options()("fit", "Fit configuration JSON",
                            cxxopts::value<std::string>())(
@@ -201,7 +201,7 @@ int main(int argc, char **argv) {
         if (cli.count("cont-jitter"))
             gs.cont_jitter_K = cli["cont-jitter"].as<int>();
         if (cli.count("debug-plots")) {
-#ifdef DIGGA_HAVE_REPORT
+#ifdef GAEL_HAVE_REPORT
             gs.debug_plots       = true;
             gs.on_stage_complete = [&](int stage_idx,
                                        const specfit::UnifiedFitWorkflow &wf) {
@@ -211,14 +211,14 @@ int main(int argc, char **argv) {
                 // you'll need access to datasets here — see note below
             };
 #else
-            std::cerr << "--debug-plots requires DIGGA_BUILD_REPORT=ON\n";
+            std::cerr << "--debug-plots requires GAEL_BUILD_REPORT=ON\n";
 #endif
         }
 
         if (cli.count("output-synthetic"))
             return run_synthetic_only(fi, gs);
 
-        api::DiggaSession session;
+        api::GaelSession session;
         session.set_global_settings(gs);
         session.set_fit_input(fi);
         session.set_num_threads(cli["threads"].as<int>());
@@ -230,7 +230,7 @@ int main(int argc, char **argv) {
         /* ---- always emit fit_parameters.csv from the CLI ------------- */
         write_fit_parameters_csv(fi.output_path, result);
         /* diagnostic only: per-spectrum model dump, opt-in via env var */
-        if (const char* d = std::getenv("DIGGA_DUMP_MODELS"); d && std::string(d) == "1")
+        if (const char* d = std::getenv("GAEL_DUMP_MODELS"); d && std::string(d) == "1")
             write_model_dats(fi.output_path + "/models", result);
 
         std::cout << "\nFit completed successfully.\n"

@@ -14,7 +14,7 @@ Vector degrade_resolution(const Vector& lam,
                           double        resOffset,
                           double        resSlope);
 
-#ifdef SPECFIT_USE_CUDA
+#ifdef GAEL_USE_CUDA
 // Forward declaration of the GPU implementation (only compiled when nvcc exists)
 Vector degrade_resolution_cuda(const Vector& lam,
                                const Vector& flux,

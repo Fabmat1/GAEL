@@ -19,7 +19,7 @@ enum class Status {
     InternalError        // unexpected C++ exception
 };
 
-// ---------- Global settings (one per DiggaSession) -----------------------
+// ---------- Global settings (one per GaelSession) -----------------------
 struct GlobalSettings {
     std::vector<std::string> base_paths;       // model-grid roots
 
@@ -56,8 +56,8 @@ struct GlobalSettings {
         const ::specfit::UnifiedFitWorkflow& wf)>
     on_stage_complete;
 
-    // Special members defined out-of-line in DiggaAPI.cpp so that the
-    // std::vector / std::function destructors run inside DIGGAcore's TU.
+    // Special members defined out-of-line in GaelAPI.cpp so that the
+    // std::vector / std::function destructors run inside GAELcore's TU.
     GlobalSettings();
     ~GlobalSettings();
     GlobalSettings(const GlobalSettings&);
@@ -204,15 +204,15 @@ struct FitResult {
 };
 
 // ---------- The session object --------------------------------------------
-class DiggaSession {
+class GaelSession {
 public:
-    DiggaSession();
-    ~DiggaSession();
+    GaelSession();
+    ~GaelSession();
 
-    DiggaSession(const DiggaSession&)            = delete;
-    DiggaSession& operator=(const DiggaSession&) = delete;
-    DiggaSession(DiggaSession&&) noexcept;
-    DiggaSession& operator=(DiggaSession&&) noexcept;
+    GaelSession(const GaelSession&)            = delete;
+    GaelSession& operator=(const GaelSession&) = delete;
+    GaelSession(GaelSession&&) noexcept;
+    GaelSession& operator=(GaelSession&&) noexcept;
 
     void set_global_settings(const GlobalSettings& gs);
     void set_fit_input      (const FitInput& fi);
@@ -231,7 +231,7 @@ public:
     // Reports failures via FitResult::status / FitResult::error_message.
     FitResult run();
 
-    // Optional report writer (requires DIGGAreport).
+    // Optional report writer (requires GAELreport).
     void write_report(const FitResult& r, const std::string& out_dir,
                       bool make_plots = true, bool make_pdf = true) const;
 
@@ -241,7 +241,7 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// ---------- JSON adapters (defined in DiggaAPI_json.cpp) ------------------
+// ---------- JSON adapters (defined in GaelAPI_json.cpp) ------------------
 GlobalSettings global_settings_from_json_file(const std::string& path);
 FitInput       fit_input_from_json_file      (const std::string& path);
 

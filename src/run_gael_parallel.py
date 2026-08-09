@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run DIGGA fitting on multiple directories in parallel with live progress display.
+Run GAEL fitting on multiple directories in parallel with live progress display.
 Skips already processed folders by checking for fit_results/{folder_nr}/fit_parameters.csv
 """
 
@@ -31,7 +31,7 @@ COLORS = {
     'DIM': '\033[2m',
 }
 
-class DIGGARunner:
+class GAELRunner:
     def __init__(self, start_idx, end_idx, max_workers=16, lines_to_show=2, force_rerun=False):
         self.start_idx = start_idx
         self.end_idx = end_idx
@@ -88,8 +88,8 @@ class DIGGARunner:
         results_file = f"fit_results/{folder_name}/fit_parameters.csv"
         return os.path.exists(results_file) and os.path.getsize(results_file) > 0
         
-    def run_single_digga(self, folder_idx):
-        """Run DIGGA for a single folder and capture output."""
+    def run_single_gael(self, folder_idx):
+        """Run GAEL for a single folder and capture output."""
         folder_name = f"{folder_idx:04d}"
         input_file = f"{folder_name}/input.json"
         
@@ -106,11 +106,11 @@ class DIGGARunner:
             self.worker_output[folder_idx] = deque(maxlen=self.lines_to_show)
         
         try:
-            # Run DIGGA command with unbuffered output
+            # Run GAEL command with unbuffered output
             env = os.environ.copy()
-            env['PYTHONUNBUFFERED'] = '1'  # In case DIGGA is a Python script
+            env['PYTHONUNBUFFERED'] = '1'  # In case GAEL is a Python script
             
-            cmd = ["DIGGA", "--fit", input_file, "--threads", "1"]
+            cmd = ["GAEL", "--fit", input_file, "--threads", "1"]
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -204,7 +204,7 @@ class DIGGARunner:
             
             # Header
             print(f"{COLORS['HEADER']}{'='*min(terminal_width, 100)}{COLORS['ENDC']}")
-            print(f"{COLORS['BOLD']}DIGGA Parallel Fitting Progress{COLORS['ENDC']}".center(min(terminal_width, 100)))
+            print(f"{COLORS['BOLD']}GAEL Parallel Fitting Progress{COLORS['ENDC']}".center(min(terminal_width, 100)))
             print(f"{COLORS['HEADER']}{'='*min(terminal_width, 100)}{COLORS['ENDC']}")
             
             # Overall progress
@@ -314,7 +314,7 @@ class DIGGARunner:
         return ansi_escape.sub('', text)
     
     def run(self):
-        """Run DIGGA fitting in parallel."""
+        """Run GAEL fitting in parallel."""
         if not self.folders_to_process:
             print(f"\n{COLORS['OKGREEN']}Nothing to do - all folders already processed!{COLORS['ENDC']}")
             return []
@@ -323,12 +323,12 @@ class DIGGARunner:
         display_thread = threading.Thread(target=self.display_progress, daemon=True)
         display_thread.start()
         
-        # Run DIGGA in parallel
+        # Run GAEL in parallel
         failed_folders = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # Submit all tasks for folders that need processing
             futures = {
-                executor.submit(self.run_single_digga, idx): idx 
+                executor.submit(self.run_single_gael, idx): idx 
                 for idx in self.folders_to_process
             }
             
@@ -343,7 +343,7 @@ class DIGGARunner:
         terminal_width = shutil.get_terminal_size().columns
         
         print(f"{COLORS['HEADER']}{'='*min(terminal_width, 100)}{COLORS['ENDC']}")
-        print(f"{COLORS['BOLD']}DIGGA Fitting Complete!{COLORS['ENDC']}".center(min(terminal_width, 100)))
+        print(f"{COLORS['BOLD']}GAEL Fitting Complete!{COLORS['ENDC']}".center(min(terminal_width, 100)))
         print(f"{COLORS['HEADER']}{'='*min(terminal_width, 100)}{COLORS['ENDC']}")
         
         processed_count = len(self.folders_to_process) - len(failed_folders)
@@ -379,7 +379,7 @@ class DIGGARunner:
         return failed_folders
 
 def main():
-    parser = argparse.ArgumentParser(description='Run DIGGA fitting in parallel')
+    parser = argparse.ArgumentParser(description='Run GAEL fitting in parallel')
     parser.add_argument('--start', type=int, default=1, help='Starting folder index (default: 1)')
     parser.add_argument('--end', type=int, required=True, help='Ending folder index')
     parser.add_argument('--workers', type=int, default=16, help='Number of parallel workers (default: 16)')
@@ -388,7 +388,7 @@ def main():
     
     args = parser.parse_args()
     
-    runner = DIGGARunner(args.start, args.end, args.workers, args.lines, args.force)
+    runner = GAELRunner(args.start, args.end, args.workers, args.lines, args.force)
     failed = runner.run()
     
     sys.exit(0 if not failed else 1)

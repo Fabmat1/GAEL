@@ -1,4 +1,4 @@
-#include "specfit/DiggaAPI.hpp"
+#include "specfit/GaelAPI.hpp"
 #include "specfit/UnifiedFitWorkflow.hpp"
 #include "specfit/CommonTypes.hpp"
 #include "specfit/ModelGrid.hpp"
@@ -25,9 +25,9 @@
 namespace specfit::api {
 
 // ───────────────────────────────────────────────────────────────────────────
-// Out-of-line special members for the public types declared in DiggaAPI.hpp.
+// Out-of-line special members for the public types declared in GaelAPI.hpp.
 // MUST live at namespace scope (not inside `namespace { … }`) so the linker
-// can resolve the references from other TUs (DiggaBackend.cpp etc.).
+// can resolve the references from other TUs (GaelBackend.cpp etc.).
 // ───────────────────────────────────────────────────────────────────────────
 GlobalSettings::GlobalSettings()                                          = default;
 GlobalSettings::~GlobalSettings()                                         = default;
@@ -81,7 +81,7 @@ FitResult& FitResult::operator=(FitResult&&) noexcept                     = defa
 // ───────────────────────────────────────────────────────────────────────────
 // Pimpl
 // ───────────────────────────────────────────────────────────────────────────
-struct DiggaSession::Impl {
+struct GaelSession::Impl {
     GlobalSettings gs;
     FitInput       fi;
     int            nthreads = 0;
@@ -89,16 +89,16 @@ struct DiggaSession::Impl {
     LogFn          logger;
 };
 
-DiggaSession::DiggaSession()  : impl_(std::make_unique<Impl>()) {}
-DiggaSession::~DiggaSession() = default;
-DiggaSession::DiggaSession(DiggaSession&&) noexcept = default;
-DiggaSession& DiggaSession::operator=(DiggaSession&&) noexcept = default;
+GaelSession::GaelSession()  : impl_(std::make_unique<Impl>()) {}
+GaelSession::~GaelSession() = default;
+GaelSession::GaelSession(GaelSession&&) noexcept = default;
+GaelSession& GaelSession::operator=(GaelSession&&) noexcept = default;
 
-void DiggaSession::set_global_settings(const GlobalSettings& gs) { impl_->gs = gs; }
-void DiggaSession::set_fit_input     (const FitInput& fi)        { impl_->fi = fi; }
-void DiggaSession::set_num_threads(int n)                        { impl_->nthreads = n; }
-void DiggaSession::set_progress_callback(ProgressFn cb)          { impl_->progress = std::move(cb); }
-void DiggaSession::set_log_callback(LogFn cb)                    { impl_->logger  = std::move(cb); }
+void GaelSession::set_global_settings(const GlobalSettings& gs) { impl_->gs = gs; }
+void GaelSession::set_fit_input     (const FitInput& fi)        { impl_->fi = fi; }
+void GaelSession::set_num_threads(int n)                        { impl_->nthreads = n; }
+void GaelSession::set_progress_callback(ProgressFn cb)          { impl_->progress = std::move(cb); }
+void GaelSession::set_log_callback(LogFn cb)                    { impl_->logger  = std::move(cb); }
 
 // ---------------------------------------------------------------------------
 namespace {
@@ -135,11 +135,11 @@ bool preprocess_one(const SpectrumFileInput& f,
     }
 
     /* ---- experiment knobs (env vars) -------------------------------- *
-     *  DIGGA_NQ_EFF = "native"  -> fit on the raw data grid (no rebin),
+     *  GAEL_NQ_EFF = "native"  -> fit on the raw data grid (no rebin),
      *                              like ISIS; also avoids rebinning sigma.
-     *  DIGGA_NQ_EFF = <number>  -> use that nq_eff for the Nyquist grid
+     *  GAEL_NQ_EFF = <number>  -> use that nq_eff for the Nyquist grid
      *                              (default 2.7).                         */
-    const char* nq_env = std::getenv("DIGGA_NQ_EFF");
+    const char* nq_env = std::getenv("GAEL_NQ_EFF");
     Spectrum rb;
     if (nq_env && std::string(nq_env) == "native") {
         rb.lambda = raw.lambda;
@@ -223,7 +223,7 @@ void reanchor(DataSet& ds, const std::vector<std::array<double,3>>& intervals)
 
 } // anonymous
 
-FitResult DiggaSession::run()
+FitResult GaelSession::run()
 {
     const auto& gs = impl_->gs;
     const auto& fi = impl_->fi;
@@ -461,14 +461,14 @@ FitResult DiggaSession::run()
     return R;
 }
 
-void DiggaSession::write_report(const FitResult&,
+void GaelSession::write_report(const FitResult&,
                                 const std::string&,
                                 bool, bool) const
 {
-#ifndef DIGGA_HAVE_REPORT
+#ifndef GAEL_HAVE_REPORT
     throw std::runtime_error(
-        "DIGGA was built without the reporting component "
-        "(DIGGA_BUILD_REPORT=OFF). Rebuild with the DIGGAreport target "
+        "GAEL was built without the reporting component "
+        "(GAEL_BUILD_REPORT=OFF). Rebuild with the GAELreport target "
         "or call generate_results() directly.");
 #else
     // Forward to the existing report generator – minimal wrapper.

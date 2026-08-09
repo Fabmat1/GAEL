@@ -187,9 +187,9 @@ static Vector apply_weights(const Vector& flux, const std::vector<WeightSegment>
  *  with gx_j a UNIFORM grid on [-3,3] (sigma units, spacing<=0.015A,   *
  *  >=15 pts/sigma), gw_j = exp(-gx_j^2/2) normalised to sum 1, and     *
  *  f_interp linear with edge-clamping.  This is the uniform-sigma-     *
- *  kernel + linear-interp scheme; DIGGA's default instead sums over    *
+ *  kernel + linear-interp scheme; GAEL's default instead sums over    *
  *  native points with dLam weights out to 5 sigma.  Selected via       *
- *  DIGGA_CONV=isis (diagnostic toggle).                                */
+ *  GAEL_CONV=isis (diagnostic toggle).                                */
 static Vector degrade_resolution_isis(const Vector& lam,
                                       const Vector& flux,
                                       double resOffset,
@@ -264,11 +264,11 @@ Vector degrade_resolution(const Vector& lam,
                          double resSlope)
 {
     {
-        const char* cv = std::getenv("DIGGA_CONV");
+        const char* cv = std::getenv("GAEL_CONV");
         if (cv && std::string(cv) == "isis")
             return degrade_resolution_isis(lam, flux, resOffset, resSlope);
     }
-#ifdef DIGGA_USE_CUDA
+#ifdef GAEL_USE_CUDA
     return degrade_resolution_cuda(lam, flux, resOffset, resSlope);
 #else
     // Create cache key
