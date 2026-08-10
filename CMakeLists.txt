@@ -21,6 +21,16 @@ endif()
 # ---------------------------------------------------------------------------
 # 1. Build options
 # ---------------------------------------------------------------------------
+# Without this a plain `cmake ..` leaves CMAKE_BUILD_TYPE empty, which means no
+# -O flag and no NDEBUG: the fit then runs ~9x slower with Eigen's per-access
+# assertions enabled.  Only applies to single-config generators.
+if(PROJECT_IS_TOP_LEVEL AND NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+                 Debug Release RelWithDebInfo MinSizeRel)
+    message(STATUS "CMAKE_BUILD_TYPE was empty - defaulting to Release")
+endif()
+
 option(GAEL_ENABLE_CUDA "Build CUDA back-end" ON)
 
 option(GAEL_LEGACY_CONVOLUTION "Use legacy spectral-resolution algorithm" OFF)

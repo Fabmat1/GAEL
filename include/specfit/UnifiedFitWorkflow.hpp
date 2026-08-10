@@ -25,7 +25,7 @@ public:
 
         int    nit_noise_max            = 5;
         int    nit_fit_max              = 5;
-        int    width_box_px             = 5;
+        int    width_box_px             = 50;  // ISIS: width_of_box_filter_in_pixels
         double outlier_sigma_lo         = 2.0;
         double outlier_sigma_hi         = 2.0;
         double conv_range_lo            = 0.9;

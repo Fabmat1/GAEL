@@ -21,7 +21,6 @@ struct DatasetInfo {
     double        resSlope;
     int           cont_param_offset;   // where in the big parameter vector
     int           cont_param_count;
-    Eigen::MatrixXd cont_basis;        // pre-computed Akima basis
     std::vector<int>  ignoreflag;     // NEW
 };
 
@@ -59,6 +58,7 @@ private:
     int                      n_total_params_;
     int                      base_cont_offset_;
     int                      num_residuals_;
+    std::vector<int>         row_offset_;   // first residual row per spectrum
 
     const ParameterIndexer&  indexer_;
 };

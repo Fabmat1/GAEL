@@ -12,10 +12,35 @@
 #include <cmath>
 #include <Eigen/Core>
 #include <Eigen/Dense>
+#include <chrono>
+#include <cstdlib>
+#include <string>
 
 using Eigen::ArrayXd;
 
 namespace specfit {
+
+/* ------------------------------------------------------------------------- *
+ *  Investigation knobs (env vars, off by default)
+ *    GAEL_STAGE_TIMING=1   -> print wall time + chi2 + parameters per stage
+ *    GAEL_STAGES=<variant> -> run a reduced stage ladder:
+ *        full     (default) 1,2,3,4,5,6,7
+ *        noladder           1,    4,5,6,7   (drop the vrad / teff-logg-z steps)
+ *        direct                  4,5,6,7   (no continuum-only pre-fit either)
+ *        nonoise            1,2,3,4,5,  7   (drop iterative noise rescaling)
+ * ------------------------------------------------------------------------- */
+namespace {
+std::string stage_variant()
+{
+    const char* v = std::getenv("GAEL_STAGES");
+    return v ? std::string(v) : std::string("full");
+}
+bool stage_timing()
+{
+    const char* v = std::getenv("GAEL_STAGE_TIMING");
+    return v && std::string(v) == "1";
+}
+} // namespace
 
 /* ------------------------------------------------------------------------- */
 /*  constructor                                                              */
@@ -390,33 +415,32 @@ void UnifiedFitWorkflow::stage5_auto_freeze_vsini()
     vsini_thres = std::max(vsini_thres, 0.5);
     std::cout << "vsini_thres = " << vsini_thres << std::endl;
     
-    // Check if any component has vsini below threshold
-    bool need_to_freeze = false;
+    // Check if any component has a *free* vsini below threshold.  ISIS only
+    // ever touches free parameters here (its `free = freeParameters` list), so
+    // a vsini the user deliberately froze must be left at its value.
+    std::vector<int> to_freeze;
     const int n_components = static_cast<int>(model_.params.size());
-    
+
     for (int c = 0; c < n_components; ++c) {
-        double vsini = unified_params_[indexer_.get(c, 0, 1)];
-        if (vsini < vsini_thres) {
-            need_to_freeze = true;
-            break;
-        }
+        if (frozen_status_[c].at("vsini")) continue;
+        if (unified_params_[indexer_.get(c, 0, 1)] < vsini_thres)
+            to_freeze.push_back(c);
     }
-    
-    if (need_to_freeze) {
-        std::cout << "[Stage 5] Freezing vsini = 0 km/s (below threshold of " 
-                  << std::fixed << std::setprecision(3) << vsini_thres 
+
+    if (!to_freeze.empty()) {
+        std::cout << "[Stage 5] Freezing vsini = 0 km/s (below threshold of "
+                  << std::fixed << std::setprecision(3) << vsini_thres
                   << " km/s)\n";
-        
-        // Freeze vsini for all components
-        for (int c = 0; c < n_components; ++c) {
+
+        for (int c : to_freeze) {
             frozen_status_[c]["vsini"] = true;
-            
+
             // Set vsini to 0 for all datasets
             for (size_t d = 0; d < datasets_.size(); ++d) {
                 unified_params_[indexer_.get(c, static_cast<int>(d), 1)] = 0.0;
             }
         }
-        
+
         // Run a fit with vsini frozen
         std::set<std::string> fp = { "all", "continuum" };
         solve_stage(fp, 100);
@@ -432,13 +456,11 @@ void UnifiedFitWorkflow::stage6_rescale_and_reject()
     const auto &P      = config_;
     const int   NDS    = static_cast<int>(datasets_.size());
 
-    /* ---------- store pristine σ only once ----------------------------- */
-    static std::vector<ArrayXd> sigma0;
-    if (sigma0.empty()) {
-        sigma0.reserve(NDS);
-        for (const auto &ds : datasets_)
-            sigma0.emplace_back(ds.obs.sigma);
-    }
+    /* ---------- store pristine σ (per workflow, not per process) -------- */
+    std::vector<ArrayXd> sigma0;
+    sigma0.reserve(NDS);
+    for (const auto &ds : datasets_)
+        sigma0.emplace_back(ds.obs.sigma);
 
     /* ---------- scratch arrays per data set ---------------------------- */
     std::vector<ArrayXd> chi_arr (NDS);
@@ -716,13 +738,43 @@ void UnifiedFitWorkflow::report_boundary_parameters() const {
 /* ------------------------------------------------------------------------- */
 void UnifiedFitWorkflow::run()
 {
-    std::cout << "[Stage 1] Continuum Fit ...\n";   stage1_continuum_only();
-    std::cout << "[Stage 2] Fitting Continuum + v_rad ...\n"; stage2_continuum_vrad();
-    std::cout << "[Stage 3] Fitting Continuum + v_rad + T_eff + log(g) + [M/H] ...\n"; stage3_continuum_vrad_teff_logg_z();
-    std::cout << "[Stage 4] First Full Fit ...\n"; stage4_full();
-    std::cout << "[Stage 5] Auto-freeze vsini if unmeasurable ...\n"; stage5_auto_freeze_vsini();
-    std::cout << "[Stage 6] Iterative Noise Rescaling and Outlier Rejection ...\n"; stage6_rescale_and_reject();
-    std::cout << "[Stage 7] Final Fit ...\n"; stage7_final();
+    const std::string variant = stage_variant();
+    const bool timing = stage_timing();
+
+    const bool do_1 = variant != "direct";
+    const bool do_23 = (variant == "full" || variant == "nonoise");
+    const bool do_6 = variant != "nonoise";
+
+    auto t_start = std::chrono::steady_clock::now();
+    auto mark = [&](const char* name) {
+        if (!timing) return;
+        const double t = std::chrono::duration<double>(
+                             std::chrono::steady_clock::now() - t_start).count();
+        std::cout << "[stage-timing] " << name << " cum_t=" << std::fixed
+                  << std::setprecision(2) << t
+                  << "s chi2=" << std::setprecision(3) << summary_.final_chi2;
+        for (std::size_t c = 0; c < model_.params.size(); ++c)
+            std::cout << " c" << (c + 1)
+                      << "_teff=" << unified_params_[indexer_.get(c, 0, 3)]
+                      << " c" << (c + 1)
+                      << "_logg=" << unified_params_[indexer_.get(c, 0, 4)]
+                      << " c" << (c + 1)
+                      << "_he=" << unified_params_[indexer_.get(c, 0, 7)];
+        std::cout << '\n';
+    };
+
+    if (timing)
+        std::cout << "[stage-timing] variant=" << variant << '\n';
+
+    if (do_1) { std::cout << "[Stage 1] Continuum Fit ...\n";   stage1_continuum_only(); mark("stage1"); }
+    if (do_23) {
+        std::cout << "[Stage 2] Fitting Continuum + v_rad ...\n"; stage2_continuum_vrad(); mark("stage2");
+        std::cout << "[Stage 3] Fitting Continuum + v_rad + T_eff + log(g) + [M/H] ...\n"; stage3_continuum_vrad_teff_logg_z(); mark("stage3");
+    }
+    std::cout << "[Stage 4] First Full Fit ...\n"; stage4_full(); mark("stage4");
+    std::cout << "[Stage 5] Auto-freeze vsini if unmeasurable ...\n"; stage5_auto_freeze_vsini(); mark("stage5");
+    if (do_6) { std::cout << "[Stage 6] Iterative Noise Rescaling and Outlier Rejection ...\n"; stage6_rescale_and_reject(); mark("stage6"); }
+    std::cout << "[Stage 7] Final Fit ...\n"; stage7_final(); mark("stage7");
     final_uncertainties_ = summary_.param_uncertainties;
     
     /* update model structure with the final parameter values */

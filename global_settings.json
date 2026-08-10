@@ -19,7 +19,7 @@
             "vrad"
         ],
         "nitNoiseMax": 5,
-        "widthBoxPx": 5,
+        "widthBoxPx": 50,
         "outlierSigmaLo": 3.0,
         "outlierSigmaHi": 3.0,
         "convFraction": 0.9,

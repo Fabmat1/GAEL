@@ -8,21 +8,25 @@
 
 namespace specfit {
 
-/* ------------------------------------------------------------------ */
-/*  Cheap GEMV that is faster than OpenBLAS for “tall&skinny” basis   */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ *
+ *  The continuum is the Akima spline through (cont_x, cont_y).
+ *
+ *  This used to be modelled as sum_k a_k * makima(e_k) -- a LINEAR expansion
+ *  in pre-computed "Akima basis" curves -- which let the anchor columns of the
+ *  Jacobian be written down analytically.  makima is not a linear function of
+ *  its ordinates, so that expansion is a different curve from makima(cont_x,a)
+ *  (0.6% rms, 2% peak on a converged real fit), and makima(cont_x,a) is what
+ *  get_model_for_dataset(), the reported continuum and the iterative-noise
+ *  stage all use.  Fitting one curve and reporting another biased log g by
+ *  -0.03 dex and Teff by +90 K against ISIS; evaluating the real spline here
+ *  removes both and halves the scatter.  The anchor columns are numeric now,
+ *  but only the owning spectrum's rows change, so they stay cheap.
+ * ------------------------------------------------------------------ */
 static inline
-Vector fast_continuum(const Eigen::MatrixXd& basis,
-                      const Vector&          coeffs)      // (np × na) · (na)
+Vector spline_continuum(const Vector& cont_x, const Vector& cont_y,
+                        const Vector& lambda)
 {
-    const int np = static_cast<int>(basis.rows());
-    Vector     cont(np);
-
-    cont.noalias()  = coeffs[0] * basis.col(0);
-    for (int k = 1; k < coeffs.size(); ++k)
-        cont.noalias() += coeffs[k] * basis.col(k);
-
-    return cont;
+    return AkimaSpline(cont_x, cont_y)(lambda);
 }
 
 MultiDatasetCost::MultiDatasetCost(const std::vector<DatasetInfo>& datasets,
@@ -49,21 +53,17 @@ MultiDatasetCost::MultiDatasetCost(const std::vector<DatasetInfo>& datasets,
 
     num_residuals_ = kept_points;
 
-    /* ----------  pre-compute Akima basis (one matrix per spectrum) ----- */
-    for (auto& ds : datasets_) {
-        const int np = static_cast<int>(ds.lambda.size());
-        const int na = ds.cont_param_count;
-
-        Eigen::MatrixXd basis(np, na);
-
-        Vector unit = Vector::Zero(na);
-        for (int k = 0; k < na; ++k) {
-            unit.setZero();
-            unit[k] = 1.0;
-            AkimaSpline spl(ds.cont_x, unit);
-            basis.col(k) = spl(ds.lambda);
-        }
-        ds.cont_basis = std::move(basis);
+    /* ----------  first residual row belonging to each spectrum --------- */
+    row_offset_.resize(datasets_.size());
+    int row = 0;
+    for (std::size_t d = 0; d < datasets_.size(); ++d) {
+        row_offset_[d] = row;
+        const auto& ds = datasets_[d];
+        for (std::size_t i = 0; i < ds.ignoreflag.size(); ++i)
+            if (ds.ignoreflag[i] &&
+                std::isfinite(ds.sigma[i]) &&
+                ds.sigma[i] > 0.0)
+                ++row;
     }
 }
 
@@ -91,7 +91,8 @@ void MultiDatasetCost::compute_residuals(const Eigen::VectorXd& p,
         Eigen::Map<const Vector> cont_y(p.data() +
                                         base_cont_offset_ +
                                         ds.cont_param_offset, na);
-        const Vector continuum = fast_continuum(ds.cont_basis, cont_y);
+        const Vector continuum =
+            spline_continuum(ds.cont_x, Vector(cont_y), ds.lambda);
 
         //std::cout << "[CostFunc](residuals)(loop) Synthetic spectra." << std::endl;
         /* ---- synthetic composite spectrum ------------------------- */
@@ -202,51 +203,50 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
     }
     //std::cout << "[CostFunc] Loop Done. Analytical Continuum eval." << std::endl; 
 
-    /* ========== (A) analytic continuum columns ===================== */
-    int row_global = 0;
+    const double eps_base = 1e-6;
+    Eigen::VectorXd r0;
+    compute_residuals(parameters, r0);
+
+    /* ========== (A) continuum anchors ============================== *
+     *  The Akima spline is not linear in its ordinates, so these columns
+     *  are numeric.  Perturbing anchor k of spectrum d changes only that
+     *  spectrum's rows, and leaves the synthetic spectra untouched, so one
+     *  spline evaluation is all it costs.                                */
     for (std::size_t ds_idx = 0; ds_idx < datasets_.size(); ++ds_idx) {
         const auto& ds  = datasets_[ds_idx];
         const int   np  = static_cast<int>(ds.lambda.size());
         const int   na  = ds.cont_param_count;
 
-        /* -- current continuum vector ------------------------------- */
         Eigen::Map<const Vector> cont_y(parameters.data() +
                                         base_cont_offset_ +
                                         ds.cont_param_offset, na);
-        const Vector continuum = fast_continuum(ds.cont_basis, cont_y);
+        const Vector continuum =
+            spline_continuum(ds.cont_x, Vector(cont_y), ds.lambda);
 
-        /* -- per-anchor loop ---------------------------------------- */
         for (int k = 0; k < na; ++k) {
             const int j_global = base_cont_offset_ + ds.cont_param_offset + k;
-            int row = row_global;
 
+            Vector cy_eps = cont_y;
+            const double h = eps_base * (std::abs(cy_eps[k]) + 1.0);
+            cy_eps[k] += h;
+            const Vector cont_eps =
+                spline_continuum(ds.cont_x, cy_eps, ds.lambda);
+
+            int row = row_offset_[ds_idx];
             for (int i = 0; i < np; ++i) {
                 if (!ds.ignoreflag[i]) continue;
                 const double sigma = all_sigma[ds_idx][i];
                 if (!std::isfinite(sigma) || sigma <= 0.0) continue;
 
-                /* d(model)/da_k  =  synth * basis_ik                    */
-                const double dmodel = all_synth[ds_idx][i] * ds.cont_basis(i,k);
-                jacobians->coeffRef(row, j_global) = dmodel / sigma;
+                const double dmodel =
+                    all_synth[ds_idx][i] * (cont_eps[i] - continuum[i]);
+                jacobians->coeffRef(row, j_global) = dmodel / (h * sigma);
                 ++row;
             }
         }
-
-        /* advance residual row offset ------------------------------- */
-        for (int i = 0; i < np; ++i)
-            if (ds.ignoreflag[i] &&
-                std::isfinite(ds.sigma[i]) &&
-                ds.sigma[i] > 0.0)
-                ++row_global;
     }
-    //std::cout << "[CostFunc] Analytical Continuum eval done. Finite Differences. (residuals)" << std::endl; 
 
-
-    /* ========== (B) FD for stellar parameters only ================= */
-    const double eps_base = 1e-6;
-    Eigen::VectorXd r0;
-    compute_residuals(parameters, r0);
-
+    /* ========== (B) FD for stellar parameters ====================== */
     for (int j = 0; j < base_cont_offset_; ++j)   // stellar parameters
     {
         double h = eps_base * (std::abs(parameters[j]) + 1.0);

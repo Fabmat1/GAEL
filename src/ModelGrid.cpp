@@ -189,21 +189,24 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                              //std::cout << "[LoadSpec](fetch) Reading .fits ." << std::endl;
                              Spectrum raw = read_fits(path);
                              //std::cout << "[LoadSpec](fetch) Broadening." << vsini << std::endl;
-                              
+
                              // Apply rotational broadening FIRST
                              Vector rot_flux;
                              if (vsini >= 0.1){
                                 //std::cout << "[LoadSpec](fetch) Broadeningggg." << vsini << std::endl;
-                                 rot_flux = rotational_broaden(raw.lambda, 
-                                                                    raw.flux, 
+                                 rot_flux = rotational_broaden(raw.lambda,
+                                                                    raw.flux,
                                                                     vsini);
                              }
                              else{
                                  rot_flux = raw.flux;
                              }
                              //std::cout << "[LoadSpec](fetch) Degrading resolution." << std::endl;
-                             // Then apply spectral degradation
+                             // Then apply spectral degradation.  The rotated flux is
+                             // kept even when no degradation is requested - otherwise
+                             // vsini would be silently dropped at infinite resolution.
                              Spectrum result = raw;
+                             result.flux = rot_flux;
                              if (resOffset != 0 || resSlope != 0){
                              result.flux = degrade_resolution(raw.lambda, rot_flux,
                                                                resOffset, resSlope);
@@ -222,6 +225,10 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
     Spectrum out; bool first=true; double wsum=0.0;
 
     for(int i=0;i<nN;++i){
+        /* A parameter sitting exactly on a grid node gives its partner corner
+           weight 0; fetching it would read (and convolve) a file that cannot
+           contribute.  With one pinned axis that is half of all corners.      */
+        if (nodes[i].w == 0.0) continue;
         //std::cout << "[LoadSpec] Fetching Spec." << std::endl;
         const Spectrum& sp = fetch(nodes[i]);
         //std::cout << "[LoadSpec] Fetched." << std::endl;
