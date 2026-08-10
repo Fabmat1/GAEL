@@ -1,6 +1,8 @@
 #pragma once
 #include "Spectrum.hpp"
 #include "Types.hpp"
+#include <cstddef>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -28,6 +30,26 @@ public:
                            double resSlope) const;
 
     const std::vector<GridAxis>& axes() const { return axes_; }
+
+    /* ------------------------------------------------------------------ *
+     *  Restrict every corner spectrum to the wavelength range that the fit
+     *  can actually see.
+     *
+     *  The sdB grid spans 3000-13218 A in 20309 points; a 3600-5250 A fit
+     *  interpolated, rotationally convolved, degraded and rebinned all of
+     *  them on every residual evaluation.  ISIS instead slices to the
+     *  observed range plus a +-2000 km/s buffer immediately before
+     *  convolve_syn (spectroscopic_fitting.sl).  Call this once with the
+     *  union of the observed ranges before fitting; the buffer for the
+     *  Doppler shift is added here.
+     *
+     *  The window becomes part of every cache key, so a grid sliced for one
+     *  fit can never serve a short spectrum to a later, wider one.
+     * ------------------------------------------------------------------ */
+    void set_wavelength_window(double lambda_min, double lambda_max);
+
+    /*  Hash of the active window; 0 when the whole grid is in use. */
+    std::size_t window_key() const { return window_key_; }
 
     struct ParameterBounds {
         double teff_min = -std::numeric_limits<double>::max();
@@ -83,6 +105,10 @@ public:
 private:
     std::string              base_;
     std::vector<GridAxis>    axes_;
+
+    double      window_lo_  = -std::numeric_limits<double>::infinity();
+    double      window_hi_  =  std::numeric_limits<double>::infinity();
+    std::size_t window_key_ = 0;
 
     Spectrum read_fits(const std::string& path) const;
 };

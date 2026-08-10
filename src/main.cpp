@@ -176,6 +176,12 @@ int main(int argc, char **argv) {
             "threads", "Number of threads",
             cxxopts::value<int>()->default_value("0"))(
             "output-synthetic", "Only write undegraded synthetic spectra")(
+            /*  100 was suspected of thrashing (one Jacobian of a 5-spectrum
+                fit touches ~90 distinct SpectrumCache keys), so it was
+                measured: with the model grid sliced to the fit window a
+                5-spectrum fit takes 4.49 s at 100 entries, 4.34 s at 512 and
+                4.39 s at 2048 -- no difference beyond run-to-run noise.
+                Leave it at 100 rather than spend the memory.               */
             "cache-size", "Cache entries",
             cxxopts::value<int>()->default_value("100"))(
             "debug-plots", "Write per-stage debug plots")(

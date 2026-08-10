@@ -233,15 +233,96 @@ Spectrum load_ascii_3col(const std::string& path)
     Vector lambda, flux, sigma;
     to_eigen<3>(rows, lambda, flux, &sigma);
 
-    // -------------------- 3. normalise by the median ----------------------------------
-    // const double med = median(flux);
-    // if (!std::isfinite(med) || std::abs(med) == 0.0)
-    //     throw std::runtime_error("load_ascii_3col: invalid flux median");
-
-    // flux .array() /= med;
-    // sigma.array() /= med;
-
+    // Normalisation and the flux/error repairs are format-independent and live
+    // in sanitize_spectrum(), which the fit pipeline applies to every loader.
     return Spectrum{lambda, flux, sigma};
+}
+
+// ----------------------------------------------------------------------------
+//  ISIS's post-read clean-up (spectroscopy_automated.sl, right after
+//  read_spectrum):
+//
+//      ind = where(f>0); l = l[ind]; f = f[ind]; err = err[ind];
+//      ind = where(err<=0, &temp); err[ind] = interpol(l[ind], l[temp], err[temp]);
+//      temp = median(f); f /= temp; err /= temp;
+//
+//  Non-positive fluxes are unphysical pixels, and a non-positive error carries
+//  no weight information -- GAEL used to keep both and simply drop them from
+//  chi2, which still let them into the neighbourhood statistics of the
+//  iterative-noise stage and biased the local mean and sdev low.  The median
+//  normalisation additionally puts the continuum anchors near 1 instead of in
+//  raw instrument counts, which matters because they share a parameter vector
+//  (and now a scaled convergence test) with Teff.
+// ----------------------------------------------------------------------------
+Spectrum sanitize_spectrum(const Spectrum& in)
+{
+    const Eigen::Index n_in = in.lambda.size();
+    if (n_in == 0) return in;
+
+    /* ---- 1. keep only strictly positive, finite flux ------------------ */
+    std::vector<Eigen::Index> keep;
+    keep.reserve(static_cast<std::size_t>(n_in));
+    for (Eigen::Index i = 0; i < n_in; ++i)
+        if (std::isfinite(in.lambda[i]) && std::isfinite(in.flux[i]) &&
+            in.flux[i] > 0.0)
+            keep.push_back(i);
+
+    if (keep.empty())
+        throw std::runtime_error("sanitize_spectrum: no positive flux values");
+
+    const Eigen::Index n = static_cast<Eigen::Index>(keep.size());
+    Spectrum out;
+    out.lambda.resize(n);
+    out.flux.resize(n);
+    out.sigma.resize(n);
+    const bool have_sigma = in.sigma.size() == n_in;
+    for (Eigen::Index k = 0; k < n; ++k) {
+        const Eigen::Index i = keep[static_cast<std::size_t>(k)];
+        out.lambda[k] = in.lambda[i];
+        out.flux[k]   = in.flux[i];
+        out.sigma[k]  = have_sigma ? in.sigma[i] : 0.0;
+    }
+    if (!in.ignoreflag.empty() &&
+        static_cast<Eigen::Index>(in.ignoreflag.size()) == n_in) {
+        out.ignoreflag.resize(static_cast<std::size_t>(n));
+        for (Eigen::Index k = 0; k < n; ++k)
+            out.ignoreflag[static_cast<std::size_t>(k)] =
+                in.ignoreflag[static_cast<std::size_t>(keep[static_cast<std::size_t>(k)])];
+    }
+
+    /* ---- 2. repair non-positive errors by interpolating the good ones -- */
+    std::vector<Eigen::Index> bad, good;
+    for (Eigen::Index i = 0; i < n; ++i) {
+        if (std::isfinite(out.sigma[i]) && out.sigma[i] > 0.0) good.push_back(i);
+        else                                                   bad.push_back(i);
+    }
+    if (!bad.empty() && good.size() >= 2) {
+        Vector lg(static_cast<Eigen::Index>(good.size()));
+        Vector sg(static_cast<Eigen::Index>(good.size()));
+        for (std::size_t k = 0; k < good.size(); ++k) {
+            lg[static_cast<Eigen::Index>(k)] = out.lambda[good[k]];
+            sg[static_cast<Eigen::Index>(k)] = out.sigma [good[k]];
+        }
+        Vector lb(static_cast<Eigen::Index>(bad.size()));
+        for (std::size_t k = 0; k < bad.size(); ++k)
+            lb[static_cast<Eigen::Index>(k)] = out.lambda[bad[k]];
+
+        const Vector repaired = linear_interpolate(lb, lg, sg);
+        for (std::size_t k = 0; k < bad.size(); ++k)
+            out.sigma[bad[k]] = repaired[static_cast<Eigen::Index>(k)];
+    }
+    // With fewer than two usable errors there is nothing to interpolate from;
+    // those pixels keep their non-positive sigma and are dropped from chi2 by
+    // the sigma <= 0 guard, exactly as before.
+
+    /* ---- 3. normalise flux and error to a median flux of one ---------- */
+    const double med = median(out.flux);
+    if (std::isfinite(med) && med > 0.0) {
+        out.flux .array() /= med;
+        out.sigma.array() /= med;
+    }
+
+    return out;
 }
 
 // ============================================================================

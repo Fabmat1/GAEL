@@ -23,17 +23,25 @@ namespace specfit {
 /* ------------------------------------------------------------------------- *
  *  Investigation knobs (env vars, off by default)
  *    GAEL_STAGE_TIMING=1   -> print wall time + chi2 + parameters per stage
- *    GAEL_STAGES=<variant> -> run a reduced stage ladder:
- *        full     (default) 1,2,3,4,5,6,7
- *        noladder           1,    4,5,6,7   (drop the vrad / teff-logg-z steps)
+ *    GAEL_STAGES=<variant> -> run a different stage ladder:
+ *        noladder (default) 1,    4,5,6,7
+ *        full               1,2,3,4,5,6,7  (the legacy ladder)
  *        direct                  4,5,6,7   (no continuum-only pre-fit either)
- *        nonoise            1,2,3,4,5,  7   (drop iterative noise rescaling)
+ *        nonoise            1,    4,5,  7  (drop iterative noise rescaling)
+ *
+ *  Stages 2 (continuum+vrad) and 3 (continuum+vrad+teff/logg/z) were measured
+ *  to cost ~32 % of the wall time of a 5-spectrum fit while changing the log g
+ *  bias by 0.0007 dex and the Teff scatter by 1 K over 100 real fits, so the
+ *  ladder skips them by default.  Stage 1 stays (without it stage 4 starts far
+ *  from the continuum solution and needs more full-Jacobian iterations than
+ *  stages 2+3 cost) and so does stage 6 (dropping it inflates the Teff scatter
+ *  1.8x for no time saving).
  * ------------------------------------------------------------------------- */
 namespace {
 std::string stage_variant()
 {
     const char* v = std::getenv("GAEL_STAGES");
-    return v ? std::string(v) : std::string("full");
+    return v ? std::string(v) : std::string("noladder");
 }
 bool stage_timing()
 {
@@ -202,7 +210,24 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
         }
     }
 
-    
+    /* ---- continuum anchor bounds, as ISIS sets them ------------------- *
+     *  set_par("cspline(1).d%d_y*"; min=0, max=2*max(get_data_counts(id).value))
+     *  A continuum height is a flux: negative is unphysical, and no anchor
+     *  should have to climb past twice the brightest pixel of its own
+     *  spectrum.  GAEL left these unbounded (+-1e10), so a poorly constrained
+     *  anchor could run away and drag the stellar parameters with it.        */
+    for (std::size_t d = 0; d < datasets_.size(); ++d) {
+        const auto& ds   = datasets_[d];
+        const int   base = stellar_total + ds_infos[d].cont_param_offset;
+        const double fmax = ds.obs.flux.size() ? ds.obs.flux.maxCoeff() : 0.0;
+        const double cap  = (std::isfinite(fmax) && fmax > 0.0) ? 2.0 * fmax : 1.0e10;
+        for (std::size_t i = 0; i < ds.cont_y.size(); ++i) {
+            lo[base + static_cast<int>(i)] = 0.0;
+            hi[base + static_cast<int>(i)] = cap;
+        }
+    }
+
+
     /* ---- c)   decide which parameters are free ------------------------ */
     std::vector<bool> free_mask(Npar, false);
 
@@ -226,10 +251,42 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
             }
     }
 
-    // continuum anchors
-    if (free_params.count("continuum"))
-        for (int i = stellar_total; i < Npar; ++i)
-            mark_free(i);
+    /* ---- continuum anchors -------------------------------------------- *
+     *  ISIS freezes anchor i when no noticed pixel lies between anchors i-1
+     *  and i+1 (spectroscopy_automated.sl, "Freeze continuum points in
+     *  ignored regions").  Such an anchor cannot change chi2 at all: its
+     *  Jacobian column is identically zero and JTJ is singular in that
+     *  direction, so leaving it free only feeds noise into the solve and into
+     *  the reported uncertainties.  With wide anchor spacing and narrow masks
+     *  nothing is frozen, which is why this stayed latent; on a heavily
+     *  masked spectrum it is the difference between a solve and a guess.     */
+    if (free_params.count("continuum")) {
+        for (std::size_t d = 0; d < datasets_.size(); ++d) {
+            const auto& ds  = datasets_[d];
+            const auto& cx  = ds.cont_x;
+            const int   na  = static_cast<int>(ds.cont_y.size());
+            const int   nx  = static_cast<int>(cx.size());
+            const int   base = stellar_total + ds_infos[d].cont_param_offset;
+
+            for (int i = 0; i < na; ++i) {
+                const double x_lo = cx[std::max(0, i - 1)];
+                const double x_hi = cx[std::min(i + 1, nx - 1)];
+
+                /*  Compared against bin_lo, as ISIS does -- the anchor x list
+                    is built on the same convention (see ContinuumUtils).     */
+                bool constrained = false;
+                const Eigen::Index np = ds.obs.lambda.size();
+                for (Eigen::Index j = 0; j < np; ++j) {
+                    if (!ds.obs.ignoreflag[j]) continue;
+                    const Eigen::Index k = (j == 0) ? 1 : j;
+                    const double bin_lo = ds.obs.lambda[j] -
+                        0.5 * std::abs(ds.obs.lambda[k] - ds.obs.lambda[k - 1]);
+                    if (bin_lo > x_lo && bin_lo < x_hi) { constrained = true; break; }
+                }
+                if (constrained) mark_free(base + i);
+            }
+        }
+    }
 
     /* ---- d)   run Levenberg–Marquardt -------------------------------- */
     Eigen::VectorXd x = Eigen::Map<Eigen::VectorXd>(unified_params_.data(), Npar);
@@ -741,9 +798,9 @@ void UnifiedFitWorkflow::run()
     const std::string variant = stage_variant();
     const bool timing = stage_timing();
 
-    const bool do_1 = variant != "direct";
-    const bool do_23 = (variant == "full" || variant == "nonoise");
-    const bool do_6 = variant != "nonoise";
+    const bool do_1  = variant != "direct";
+    const bool do_23 = variant == "full";
+    const bool do_6  = variant != "nonoise";
 
     auto t_start = std::chrono::steady_clock::now();
     auto mark = [&](const char* name) {

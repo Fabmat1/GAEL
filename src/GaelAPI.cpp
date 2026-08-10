@@ -3,9 +3,9 @@
 #include "specfit/CommonTypes.hpp"
 #include "specfit/ModelGrid.hpp"
 #include "specfit/SpectrumLoaders.hpp"
+#include "specfit/ContinuumUtils.hpp"
 #include "specfit/NyquistGrid.hpp"
 #include "specfit/Rebin.hpp"
-#include "specfit/ContinuumUtils.hpp"
 #include "specfit/AkimaSpline.hpp"
 #include "specfit/ParameterIndexer.hpp"
 #include <Eigen/Core>
@@ -103,6 +103,28 @@ void GaelSession::set_log_callback(LogFn cb)                    { impl_->logger 
 // ---------------------------------------------------------------------------
 namespace {
 
+// ---------------------------------------------------------------------------
+//  ISIS seeds every continuum anchor with the same height,
+//  `median(get_data_counts(id).value)` -- a flat continuum.  GAEL used to seed
+//  each anchor with the locally interpolated flux, so an anchor that happened
+//  to land in a line core started inside the core and the spline had to climb
+//  out of it.  Match ISIS.
+// ---------------------------------------------------------------------------
+std::vector<double> flat_anchor_heights(const Vector& flux, Eigen::Index n_anchors)
+{
+    double level = 1.0;
+    if (flux.size() > 0) {
+        std::vector<double> v(flux.data(), flux.data() + flux.size());
+        const std::size_t k = v.size() / 2;
+        std::nth_element(v.begin(), v.begin() + k, v.end());
+        level = v[k];
+        if (v.size() % 2 == 0 && k > 0)
+            level = 0.5 * (level + *std::max_element(v.begin(), v.begin() + k));
+    }
+    if (!std::isfinite(level) || level <= 0.0) level = 1e-6;
+    return std::vector<double>(static_cast<std::size_t>(n_anchors), level);
+}
+
 bool preprocess_one(const SpectrumFileInput& f,
                     const ObservationInput&  obs,
                     const GlobalSettings&    gs,
@@ -116,6 +138,14 @@ bool preprocess_one(const SpectrumFileInput& f,
         return false;
     }
     if (raw.lambda.size() == 0) { reject_reason = "empty spectrum"; return false; }
+
+    /* Drop non-positive flux, repair non-positive errors, normalise to a
+       median flux of one -- what ISIS does right after read_spectrum.      */
+    try { raw = sanitize_spectrum(raw); }
+    catch (const std::exception& e) {
+        reject_reason = std::string("unusable spectrum: ") + e.what();
+        return false;
+    }
 
     const double wmin = raw.lambda.minCoeff();
 
@@ -134,34 +164,101 @@ bool preprocess_one(const SpectrumFileInput& f,
         return false;
     }
 
-    /* ---- experiment knobs (env vars) -------------------------------- *
-     *  GAEL_NQ_EFF = "native"  -> fit on the raw data grid (no rebin),
-     *                              like ISIS; also avoids rebinning sigma.
-     *  GAEL_NQ_EFF = <number>  -> use that nq_eff for the Nyquist grid
-     *                              (default 2.7).                         */
+    /* ------------------------------------------------------------------ *
+     *  Data-side sampling, then the waveCut trim.
+     *
+     *  ISIS never resamples the data: it goes straight from the trimmed
+     *  arrays into define_counts() and fits the instrument's own pixels, and
+     *  the only resampling it does is of the *model* onto the data bins
+     *  (which compute_synthetic() mirrors with trapezoidal_rebin).  Fitting
+     *  the native pixels is therefore the structurally faithful choice, and
+     *  it is implemented here -- GAEL_NQ_EFF=native.
+     *
+     *  It is *not* the default, because it was measured and it makes
+     *  agreement with ISIS clearly worse.  Over the 100 real_single cases,
+     *  everything else held fixed:
+     *
+     *      Nyquist (nq_eff = 2.7)   Teff bias  -25 K   log g bias +0.002
+     *      native pixels            Teff bias  -82 K   log g bias -0.010
+     *
+     *  (an earlier run, before the continuum-linearisation fix, saw the same
+     *  sign and size, so this is reproducible and not an artefact of it).
+     *  The cause is not the trim -- trimming with native pixels measures
+     *  identically to flagging -- it is the sampling itself; the Nyquist grid
+     *  is ~19 % finer than these LAMOST/BOSS spectra, and the interpolated,
+     *  correlated noise changes how much stage 6 inflates sigma in the Balmer
+     *  wings relative to the continuum, which is exactly what sets log g.
+     *  Until that is understood, the project's rule -- correct means agreeing
+     *  with spectroscopy_automated.sl -- keeps the resampled grid.
+     *
+     *  The trim itself is unconditional and is a strict no-op for the fit:
+     *  the Nyquist grid is still generated from the *untrimmed* range, so
+     *  every fitted pixel keeps the wavelength it had when waveCut was only a
+     *  flag (the grid steps lambda += lambda/(nq_eff*R) from lambda_min, so
+     *  trimming first would re-phase it -- worth up to 0.047 dex of log g on
+     *  a single spectrum).  Trimming afterwards only drops pixels that
+     *  contributed nothing, which is what makes the data array *be* the fit
+     *  window: model evaluation, the continuum spline and the stage-6 noise
+     *  statistics then all run over the fitted pixels alone -- a 3600-5250 A
+     *  cut keeps under a third of a typical LAMOST array.  ISIS's cut is
+     *  strict on both ends
+     *  (`where(min(wave_cut) < l < max(wave_cut))`), so this one is too, and
+     *  `ignore` ranges stay flags -- ISIS keeps those in the noticed list.
+     * ------------------------------------------------------------------ */
+    const auto wcut   = f.waveCut.value_or(obs.waveCut);
+    const auto ignore = f.ignore.value_or(obs.ignore);
+
     const char* nq_env = std::getenv("GAEL_NQ_EFF");
-    Spectrum rb;
-    if (nq_env && std::string(nq_env) == "native") {
-        rb.lambda = raw.lambda;
-        rb.flux   = raw.flux;
-        rb.sigma  = raw.sigma;
+    const bool  native = nq_env && std::string(nq_env) == "native";
+
+    Spectrum res;                       // full range, chosen sampling
+    if (native) {
+        res.lambda = raw.lambda;
+        res.flux   = raw.flux;
+        res.sigma  = raw.sigma;
     } else {
         const double nq_eff = nq_env ? std::atof(nq_env) : 2.7;
         Vector nyq = build_nyquist_grid(raw.lambda.minCoeff(),
                                         raw.lambda.maxCoeff(),
                                         f.resOffset, f.resSlope, nq_eff);
-        rb.lambda = nyq;
-        rb.flux   = trapezoidal_rebin(raw.lambda, raw.flux,  nyq);
-        rb.sigma  = trapezoidal_rebin(raw.lambda, raw.sigma, nyq);
+        res.lambda = nyq;
+        res.flux   = trapezoidal_rebin(raw.lambda, raw.flux,  nyq);
+        /*  Averaging sigma the way flux is averaged is not the uncertainty of
+         *  the averaged flux; it is only defensible because the grid is finer
+         *  than the data (so this is interpolation, not averaging) and
+         *  because stage 6 rescales sigma from the local scatter anyway.
+         *  GAEL_NQ_EFF=native avoids the question entirely.                */
+        res.sigma  = trapezoidal_rebin(raw.lambda, raw.sigma, nyq);
     }
 
-    const auto wcut   = f.waveCut.value_or(obs.waveCut);
-    const auto ignore = f.ignore.value_or(obs.ignore);
+    std::vector<Eigen::Index> in_window;
+    in_window.reserve(static_cast<std::size_t>(res.lambda.size()));
+    for (Eigen::Index j = 0; j < res.lambda.size(); ++j)
+        if (res.lambda[j] > wcut[0] && res.lambda[j] < wcut[1])
+            in_window.push_back(j);
 
-    std::vector<int> flags(rb.lambda.size(), 1);
-    for (Eigen::Index j = 0; j < rb.lambda.size(); ++j) {
+    if (in_window.size() < 2) {
+        reject_reason = "fewer than 2 points inside waveCut [" +
+                        std::to_string(wcut[0]) + ", " +
+                        std::to_string(wcut[1]) + "]";
+        return false;
+    }
+
+    const Eigen::Index n = static_cast<Eigen::Index>(in_window.size());
+    Spectrum rb;
+    rb.lambda.resize(n);
+    rb.flux  .resize(n);
+    rb.sigma .resize(n);
+    for (Eigen::Index j = 0; j < n; ++j) {
+        const Eigen::Index i = in_window[static_cast<std::size_t>(j)];
+        rb.lambda[j] = res.lambda[i];
+        rb.flux  [j] = res.flux  [i];
+        rb.sigma [j] = res.sigma [i];
+    }
+
+    std::vector<int> flags(static_cast<std::size_t>(n), 1);
+    for (Eigen::Index j = 0; j < n; ++j) {
         const double wl = rb.lambda[j];
-        if (wl < wcut[0] || wl > wcut[1]) { flags[j] = 0; continue; }
         for (const auto& r : ignore)
             if (wl >= r[0] && wl <= r[1]) { flags[j] = 0; break; }
     }
@@ -174,14 +271,11 @@ bool preprocess_one(const SpectrumFileInput& f,
         intervals.emplace_back(a[0], a[1], a[2]);
 
     Vector cont_x = anchors_from_intervals(intervals, rb);
-    Vector cy_raw = interp_linear(rb.lambda, rb.flux, cont_x);
 
     out.name      = f.filename;
     out.obs       = std::move(rb);
     out.cont_x    = cont_x;
-    out.cont_y.assign(cont_x.size(), 0.0);
-    for (Eigen::Index i = 0; i < cont_x.size(); ++i)
-        out.cont_y[i] = std::max(cy_raw[i], 1e-6);
+    out.cont_y    = flat_anchor_heights(out.obs.flux, cont_x.size());
     out.resOffset = f.resOffset;
     out.resSlope  = f.resSlope;
     out.keep      = std::move(flags);
@@ -214,11 +308,8 @@ void reanchor(DataSet& ds, const std::vector<std::array<double,3>>& intervals)
     iv.reserve(intervals.size());
     for (const auto& a : intervals) iv.emplace_back(a[0], a[1], a[2]);
     Vector cx = anchors_from_intervals(iv, ds.obs);
-    Vector cy = interp_linear(ds.obs.lambda, ds.obs.flux, cx);
     ds.cont_x = cx;
-    ds.cont_y.assign(static_cast<std::size_t>(cx.size()), 0.0);
-    for (Eigen::Index i = 0; i < cx.size(); ++i)
-        ds.cont_y[static_cast<std::size_t>(i)] = std::max(cy[i], 1e-6);
+    ds.cont_y = flat_anchor_heights(ds.obs.flux, cx.size());
 }
 
 } // anonymous
@@ -279,6 +370,27 @@ FitResult GaelSession::run()
     }
     if (datasets.empty())
         throw std::runtime_error("No spectra passed the quality filters");
+
+    /* ---- restrict the model grids to the wavelengths that are fitted -----
+     *  Union over all datasets, widened by the largest Doppler shift the
+     *  solver can reach (|vrad| <= 1000 km/s, bounded in solve_stage; ISIS
+     *  uses the same idea with a +-2000 km/s buffer).  Everything downstream
+     *  -- the rotational and instrumental convolutions, the rebin onto the
+     *  observed bins -- then works on the fitted range instead of the whole
+     *  3000-13218 A grid.                                                   */
+    {
+        constexpr double kVradBuffer = 1.007;   // 2000 km/s, as in ISIS
+        double lo =  std::numeric_limits<double>::infinity();
+        double hi = -std::numeric_limits<double>::infinity();
+        for (const auto& ds : datasets) {
+            if (ds.obs.lambda.size() == 0) continue;
+            lo = std::min(lo, ds.obs.lambda.minCoeff());
+            hi = std::max(hi, ds.obs.lambda.maxCoeff());
+        }
+        if (lo < hi)
+            for (auto& g : model.grids)
+                g.set_wavelength_window(lo / kVradBuffer, hi * kVradBuffer);
+    }
 
     // ---- workflow config ----------------------------------------------------
     ::specfit::UnifiedFitWorkflow::Config wcfg;

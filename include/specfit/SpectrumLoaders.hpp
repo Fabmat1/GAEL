@@ -39,4 +39,12 @@ Spectrum load_muse             (const std::string& path);
 Spectrum load_spectrum(const std::string& path,
                        const std::string& format = "auto");
 
+// ---------------------------------------------------------------------------
+//  Format-independent post-read clean-up, mirroring what ISIS does right after
+//  read_spectrum: drop non-positive flux pixels, repair non-positive errors by
+//  interpolating the usable ones, then divide flux and error by the median
+//  flux.  Applied by the fit pipeline to every loader.
+// ---------------------------------------------------------------------------
+Spectrum sanitize_spectrum(const Spectrum& in);
+
 } // namespace specfit

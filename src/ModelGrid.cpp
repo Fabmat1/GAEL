@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <cstring>
 #include <array>
+#include <limits>
+#include <mutex>
 
 namespace fs = std::filesystem;
 
@@ -167,6 +169,7 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
         k = hash_combine(k, hash_double(vsini));      // Include vsini in cache key
         k = hash_combine(k, hash_double(resOffset));
         k = hash_combine(k, hash_double(resSlope));
+        k = hash_combine(k, window_key_);             // slice is part of the key
 
         Entry& e = lc[k];
         //std::cout << "[LoadSpec](fetch) Entry hashes done..." << std::endl;
@@ -241,23 +244,41 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
     return out;
 }
 
+/* ------------------------------------------------------------------ */
+void ModelGrid::set_wavelength_window(double lambda_min, double lambda_max)
+{
+    if (!(lambda_max > lambda_min)) return;      // nonsense: keep everything
+
+    window_lo_  = lambda_min;
+    window_hi_  = lambda_max;
+    window_key_ = hash_combine(hash_double(lambda_min), hash_double(lambda_max));
+}
+
 /* ------------------------------------------------------------------ *
- *                read_fits()   (unchanged)                           *
+ *                read_fits()                                          *
  * ------------------------------------------------------------------ */
 Spectrum ModelGrid::read_fits(const std::string& path) const
 {
     using Vec = std::vector<Real>;
+    /*  Corner spectra are read from several OpenMP threads at once
+        (SpectrumCache builds outside its lock on purpose), so the shared
+        wavelength cache needs its own guard.                            */
     static std::unordered_map<std::string,Vector> wave_cache;
+    static std::mutex                             wave_mtx;
 
     Vector lam;
-    if (auto it = wave_cache.find(base_); it!=wave_cache.end()) lam=it->second;
-    else {
+    {
+        std::lock_guard<std::mutex> lk(wave_mtx);
+        if (auto it = wave_cache.find(base_); it!=wave_cache.end()) lam=it->second;
+    }
+    if (lam.size()==0) {
         fs::path lp = fs::path(base_) / "HHE" / "lambda.fits";
         if (fs::exists(lp)){
             CCfits::FITS fl(lp.string(), CCfits::Read);
             CCfits::ExtHDU& e = fl.extension(1);
             Vec tmp; e.column("l").read(tmp,1,e.rows());
             lam = Eigen::Map<Vector>(tmp.data(),tmp.size());
+            std::lock_guard<std::mutex> lk(wave_mtx);
             wave_cache.emplace(base_,lam);
         }
     }
@@ -269,13 +290,33 @@ Spectrum ModelGrid::read_fits(const std::string& path) const
     if(lam.size()==0){
         Vec lt; ext.column("l").read(lt,1,ext.rows());
         lam = Eigen::Map<Vector>(lt.data(),lt.size());
+        std::lock_guard<std::mutex> lk(wave_mtx);
         wave_cache.emplace(base_,lam);
     }
 
     Spectrum sp;
-    sp.lambda = lam;
-    sp.flux   = Eigen::Map<Vector>(fl.data(),fl.size());
-    sp.sigma  = Vector::Ones(lam.size());
+
+    /* ---- keep only the window the fit can see ---------------------- *
+     *  One extra grid point on each side so that the rebin onto the
+     *  observed bins, and the convolution kernels, still have neighbours
+     *  at the window edges.                                            */
+    Eigen::Index i0 = 0, i1 = lam.size();          // [i0, i1)
+    if (window_lo_ > -std::numeric_limits<double>::infinity() &&
+        lam.size() > 0)
+    {
+        const Real* b = lam.data();
+        const Real* e = lam.data() + lam.size();
+        i0 = std::lower_bound(b, e, window_lo_) - b;
+        i1 = std::upper_bound(b, e, window_hi_) - b;
+        if (i0 > 0)          --i0;
+        if (i1 < lam.size()) ++i1;
+        if (i1 <= i0) { i0 = 0; i1 = lam.size(); }  // window misses the grid
+    }
+    const Eigen::Index n = i1 - i0;
+
+    sp.lambda = lam.segment(i0, n);
+    sp.flux   = Eigen::Map<Vector>(fl.data(), fl.size()).segment(i0, n);
+    sp.sigma  = Vector::Ones(n);
     return sp;
 }
 

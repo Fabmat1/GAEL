@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <iostream>
 #include <cmath>       // std::abs
-#include <cstdlib>     // std::getenv
 
 namespace specfit {
 
@@ -25,49 +24,51 @@ Vector anchors_from_intervals(
     if (!spectrum.lambda.allFinite())
         throw std::runtime_error("anchors_from_intervals(): spectrum.lambda contains NaN/Inf");
 
-    /* ---------- collect wavelengths used to bound the anchor list ------ *
-     *  Default: only non-ignored (fit-window) points  ->  anchors live
-     *  inside the fit window.  ISIS instead spans the full DATA range and
-     *  adds exterior boundary anchors, giving a denser, edge-constrained
-     *  continuum.  GAEL_ANCHORS_FULLRANGE=1 reproduces the ISIS behaviour
-     *  (clip anchors to the full data range, ignore the mask for bounds). */
-    const char* full_env = std::getenv("GAEL_ANCHORS_FULLRANGE");
-    const bool  full_range = full_env && std::string(full_env) == "1";
-
-    std::vector<double> good_lambda;
-    good_lambda.reserve(spectrum.lambda.size());
-
-    for (Eigen::Index i = 0; i < spectrum.lambda.size(); ++i)
-    {
-        bool keep = (full_range || spectrum.ignoreflag.empty())
-                        ? true
-                        : (spectrum.ignoreflag[i] == 1);
-        if (keep) good_lambda.push_back(spectrum.lambda[i]);
+    /* ---------- anchor x list, exactly as ISIS builds it --------------- *
+     *  spectroscopy_automated.sl:
+     *      l[id] = union(bin_lo[0]-1, bin_lo[-1]+1, cspline_anchorpoints);
+     *      l[id] = l[id][where(bin_lo[0]-2 <= l[id] <= bin_lo[-1]+2)];
+     *
+     *  So the two boundary anchors sit 1 Angstrom *outside* the data on each
+     *  side, and the user's anchors are clipped to a 2 Angstrom collar around
+     *  it.  GAEL used to put its boundary anchors ten pixels *inside* the
+     *  data instead, which leaves the spline's end segments determined by the
+     *  first interior anchor alone and makes the fitted continuum at the edges
+     *  depend on the pixel sampling.
+     *
+     *  The bounds come from the whole data array, not from the noticed pixels:
+     *  ISIS's bin_lo covers every bin of the dataset regardless of what is
+     *  ignored, and after the waveCut trim the data array already *is* the fit
+     *  window.
+     *
+     *  bin_lo, not the bin centre.  GAEL stores pixel centres; ISIS converts
+     *  them to lower bin boundaries before define_counts, so its first anchor
+     *  reference is half a pixel bluer than the first centre.  Half a pixel
+     *  sounds ignorable but it decides whether a user anchor that sits just
+     *  below the first centre (3600 A, with data starting at 3600.4) falls
+     *  inside the collar and whether the boundary anchor has any noticed pixel
+     *  next to it -- i.e. whether the freeze rule in solve_stage pins the blue
+     *  edge of the continuum.                                                */
+    const Eigen::Index n_lam = spectrum.lambda.size();
+    double min_lambda = spectrum.lambda[0];
+    double max_lambda = spectrum.lambda[n_lam - 1];
+    if (min_lambda > max_lambda) std::swap(min_lambda, max_lambda);
+    if (n_lam >= 2) {
+        const double half_lo = 0.5 * (spectrum.lambda[1] - spectrum.lambda[0]);
+        const double half_hi = 0.5 * (spectrum.lambda[n_lam - 1] -
+                                      spectrum.lambda[n_lam - 2]);
+        min_lambda -= std::abs(half_lo);
+        max_lambda -= std::abs(half_hi);   // bin_lo of the *last* bin
     }
 
-    if (good_lambda.empty())
-        throw std::runtime_error(
-            "anchors_from_intervals(): after masking, no wavelength point is left");
+    const double clip_lo = min_lambda - 2.0;
+    const double clip_hi = max_lambda + 2.0;
 
-    std::sort(good_lambda.begin(), good_lambda.end());
-    const double min_lambda = good_lambda.front();
-    const double max_lambda = good_lambda.back();
-
-    /* ---------- build anchor list ------------------------------------- */
     std::vector<double> xs;
     xs.reserve(32 + intervals.size() * 16);   // heuristic
 
-    /* two boundary anchors (or the 10th / n-10th if enough points) */
-    if (good_lambda.size() >= 20)
-    {
-        xs.push_back(good_lambda[9]);
-        xs.push_back(good_lambda[good_lambda.size() - 10]);
-    }
-    else
-    {
-        xs.push_back(min_lambda);
-        xs.push_back(max_lambda);
-    }
+    xs.push_back(min_lambda - 1.0);
+    xs.push_back(max_lambda + 1.0);
 
     /* user supplied intervals ----------------------------------------- */
     for (const auto& tpl : intervals)
@@ -83,10 +84,10 @@ Vector anchors_from_intervals(
 
         /* iterate with a small epsilon so that “hi” itself is included */
         for (double x = lo; x <= hi + 1e-6; x += step)
-            if (x >= min_lambda && x <= max_lambda) xs.push_back(x);
+            if (x >= clip_lo && x <= clip_hi) xs.push_back(x);
 
         /* ensure hi is present if in range */
-        if (hi >= min_lambda && hi <= max_lambda) xs.push_back(hi);
+        if (hi >= clip_lo && hi <= clip_hi) xs.push_back(hi);
     }
 
     /* ---------- final clean-up ---------------------------------------- */

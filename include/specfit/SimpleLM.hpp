@@ -12,14 +12,44 @@ namespace specfit {
 /* ---------------------------  user visible bits  --------------------------- */
 /*  A value ≤ 0 means "determine automatically".                              */
 
+/*
+ *  Convergence is tested per free parameter, never on a single "loudest" one.
+ *
+ *  The parameters of a spectral fit carry incommensurate units (K, dex, km/s,
+ *  continuum counts), so a raw   max_j |g_j| < tol   is decided entirely by
+ *  whichever parameter happens to have the largest gradient in its own units;
+ *  log g could be left far from its stationary point because Teff had already
+ *  reached the shared threshold.  Every test below is therefore made
+ *  dimensionless by the column norm  d_j = sqrt((JᵀJ)_jj)  -- the same Fletcher
+ *  scaling the damping already uses -- and must hold for *all* free parameters:
+ *
+ *    gradient :  |g_j| / (d_j ||r||)              < gradient_tolerance
+ *                (the cosine of the angle between r and column j of J)
+ *    step     :  d_j |dx_j| / ||r||               < step_tolerance
+ *                (the model change along j, in units of sigma, relative to r)
+ *    chi2     :  |predicted reduction| / max(1,chi2) < chi2_tolerance
+ *
+ *  d_j is a natural scale for parameter j and is finite even when x_j == 0,
+ *  which a plain relative test on |x_j| is not (vrad and z legitimately sit at
+ *  zero).  A column that is identically zero means the parameter cannot move
+ *  the model at all; it is treated as converged rather than as a blocker.
+ */
 struct LMSolverOptions {
     int    max_iterations        = 200;      // hard upper limit
     double gradient_tolerance    = 0;        // auto
     double step_tolerance        = 0;        // auto
     double chi2_tolerance        = 0;        // auto
     double initial_lambda        = 0;        // auto
+    int    max_consecutive_rejects = 12;     // give up when LM cannot progress
     bool   verbose               = false;    // chatty?
 };
+
+/*  Defaults for the scaled tolerances above.  They are dimensionless, so --
+ *  unlike the old 1e-4 * max|g| -- they do not have to be re-derived from the
+ *  problem and mean the same thing in every stage.                          */
+inline constexpr double kLMGradientTol = 1e-6;
+inline constexpr double kLMStepTol     = 1e-8;
+inline constexpr double kLMChi2Tol     = 1e-10;
 
 struct LMSolverSummary {
     int    iterations         = 0;
@@ -143,24 +173,12 @@ levenberg_marquardt(Functor&&                    func,
     /* --------------------------------------------------------------- */
     /*  automatic tolerances and initial λ                             */
     /* --------------------------------------------------------------- */
-    Eigen::VectorXd g0 = J.transpose() * r;
-    double gmax0       = g0.cwiseAbs().maxCoeff();
     const double eps   = std::numeric_limits<double>::epsilon();
 
-    if (opt.gradient_tolerance <= 0.0) {
-        /* derive it from the actual gradient, guard against gmax0 == 0 */
-        if (gmax0 > 0.0)
-            opt.gradient_tolerance = 1e-4 * gmax0;          // 1e-4 × |∇χ²|ₘₐₓ
-        else
-            opt.gradient_tolerance = 1e-12;                 // tiny fallback
-    }
-
-    double xnorm = x.lpNorm<Eigen::Infinity>();
-    if (opt.step_tolerance <= 0.0)
-        opt.step_tolerance = 1e-8 * std::max(1.0, xnorm);
-
-    if (opt.chi2_tolerance  <= 0.0)
-        opt.chi2_tolerance  = 1e-8 * std::max(1.0, chi2);
+    /* All three tolerances are dimensionless (see LMSolverOptions). */
+    if (opt.gradient_tolerance <= 0.0) opt.gradient_tolerance = kLMGradientTol;
+    if (opt.step_tolerance     <= 0.0) opt.step_tolerance     = kLMStepTol;
+    if (opt.chi2_tolerance     <= 0.0) opt.chi2_tolerance     = kLMChi2Tol;
 
     if (opt.initial_lambda  <= 0.0) {
         Eigen::VectorXd diag = (J.transpose() * J).diagonal();
@@ -198,9 +216,12 @@ levenberg_marquardt(Functor&&                    func,
         dx.resize(n);
     }
 
-    if (opt.verbose)
+    if (opt.verbose) {
         std::cout << "[LM] One time allocations complete." << std::endl;
-    std::cout << "[LM]  Entering iteration loop..." << std::endl;
+        std::cout << "[LM]  Entering iteration loop..." << std::endl;
+    }
+
+    int consecutive_rejects = 0;
 
     /* --------------------------------------------------------------- */
     /*  main iteration loop                                            */
@@ -222,18 +243,6 @@ levenberg_marquardt(Functor&&                    func,
 
         /* ---------------------- g = Jᵀ r --------------------------- */
         g.noalias() = Jf.transpose() * r;
-        double gmax = g.cwiseAbs().maxCoeff();
-        if (gmax < opt.gradient_tolerance) {       // gradient small
-            if (summ.iterations == 1) {            // happens immediately
-                std::cout << "[LM]  Warning: gradient tolerance may be too large – "
-                             "solver stopped without iterating\n";
-            }
-            summ.converged = true;
-            break;
-        }
-
-        if (opt.verbose)
-            std::cout << "[LM] Transposed. Multiplying" << std::endl;
 
         /* ---------- JTJ = JᵀJ  (use rank-update, lower triangle) ---- */
         JTJ.setZero();
@@ -242,6 +251,28 @@ levenberg_marquardt(Functor&&                    func,
             JTJ.transpose();                       // copy to upper
 
         diag_JTJ = JTJ.diagonal();
+
+        /* --------- per-parameter gradient test (see header) --------- *
+         *  |g_j| / (sqrt(JᵀJ_jj) ||r||) is the cosine of the angle between
+         *  the residual vector and column j; it is dimensionless, so the
+         *  same threshold is meaningful for Teff, log g and a continuum
+         *  anchor alike, and *every* free parameter has to pass it.      */
+        const double rnorm = std::sqrt(chi2);
+        double cos_max = 0.0;
+        if (rnorm > 0.0) {
+            for (int c = 0; c < n_free; ++c) {
+                const double dj = std::sqrt(diag_JTJ[c]);
+                if (!(dj > 0.0)) continue;         // column ≡ 0: cannot move
+                cos_max = std::max(cos_max, std::abs(g[c]) / (dj * rnorm));
+            }
+        }
+        if (cos_max < opt.gradient_tolerance) {    // all gradients small
+            if (summ.iterations == 1)
+                std::cout << "[LM]  Warning: starting point already satisfies the "
+                             "gradient tolerance – solver stopped without iterating\n";
+            summ.converged = true;
+            break;
+        }
 
         if (opt.verbose)
             std::cout << "[LM] Multiplied Matrices. Diagonalizing and solving." << std::endl;
@@ -267,14 +298,21 @@ levenberg_marquardt(Functor&&                    func,
             if (col >= 0) dx[j] = dx_free[col];
         }
 
-        if (dx.cwiseAbs().maxCoeff() < opt.step_tolerance) {
-            if (summ.iterations == 1) {
-                std::cout << "[LM]  Warning: step tolerance too large – "
-                             "tightening it once.\n";
-                opt.step_tolerance *= 0.01;    // tighten and try again
-            }
-            else {
-                summ.converged = true;         // later: genuine convergence
+        /* ---- per-parameter step test (see header) ------------------ *
+         *  d_j |dx_j| / ||r|| is how much parameter j alone would move the
+         *  model, in units of sigma, relative to the residual that is left.
+         *  Converged only when that is negligible for *every* free
+         *  parameter, so a small step in Teff cannot end the fit while a
+         *  continuum anchor or log g is still travelling.                */
+        {
+            double step_max = 0.0;
+            const double rnorm_s = std::max(std::sqrt(chi2), eps);
+            for (int c = 0; c < n_free; ++c)
+                step_max = std::max(step_max,
+                                    std::sqrt(diag_JTJ[c]) * std::abs(dx_free[c])
+                                        / rnorm_s);
+            if (step_max < opt.step_tolerance) {
+                summ.converged = true;
                 break;
             }
         }
@@ -324,6 +362,7 @@ levenberg_marquardt(Functor&&                    func,
             r.swap(r_try);
             J.swap(J_try);
             chi2 = chi2_try;
+            consecutive_rejects = 0;
 
             /* adaptive λ (MINPACK style) ---------------------------- */
             double fac = std::max(1.0/3.0,
@@ -331,24 +370,34 @@ levenberg_marquardt(Functor&&                    func,
             lambda *= fac;
             lambda  = std::max(lambda, 1e-18);
 
-            std::cout << "[LM]  iter " << it
-                        << "  ρ="  << std::fixed << std::setprecision(2) << rho
-                        << "  χ²=" << std::fixed << std::setprecision(2) << chi2
-                        << "  λ="  << std::fixed << std::setprecision(2) << lambda
-                        << "  (accepted)\n";
+            if (opt.verbose)
+                std::cout << "[LM]  iter " << it
+                          << "  ρ="  << std::fixed << std::setprecision(2) << rho
+                          << "  χ²=" << std::fixed << std::setprecision(2) << chi2
+                          << "  λ="  << std::scientific << std::setprecision(2) << lambda
+                          << "  (accepted)\n";
 
-            if (std::abs(pred_red) < opt.chi2_tolerance) {
+            if (std::abs(pred_red) < opt.chi2_tolerance * std::max(1.0, chi2)) {
                 summ.converged = true;
                 break;
             }
         } else {
             /* ------------------- rejected step --------------------- */
             lambda *= 2.0;
-            std::cout << "[LM]  iter " << it
-                        << "  ρ="  << std::fixed << std::setprecision(2) << rho
-                        << "  χ²=" << std::fixed << std::setprecision(2) << chi2_try
-                        << "  λ="  << std::fixed << std::setprecision(2) << lambda
-                        << "  (rejected)\n";
+            ++consecutive_rejects;
+            if (opt.verbose)
+                std::cout << "[LM]  iter " << it
+                          << "  ρ="  << std::fixed << std::setprecision(2) << rho
+                          << "  χ²=" << std::fixed << std::setprecision(2) << chi2_try
+                          << "  λ="  << std::scientific << std::setprecision(2) << lambda
+                          << "  (rejected)\n";
+
+            /* Damping has been raised this many times without a single
+               improvement: the model cannot be improved from here (usually
+               finite-difference noise in the Jacobian), so stop rather than
+               burn the whole iteration budget on rejected steps.        */
+            if (consecutive_rejects >= opt.max_consecutive_rejects)
+                break;
         }
     }
 

@@ -63,7 +63,8 @@ inline std::size_t make_hash_full(const StellarParams& p,
  */
 inline std::size_t make_hash_surface(const StellarParams& p,
                                      double               resOffset,
-                                     double               resSlope)
+                                     double               resSlope,
+                                     std::size_t          window_key)
 {
     std::size_t seed = 0xBADA555EULL;   // different domain separator
 
@@ -76,6 +77,11 @@ inline std::size_t make_hash_surface(const StellarParams& p,
 
     hash_combine(seed, resOffset);
     hash_combine(seed, resSlope);
+
+    /*  A surface spectrum is only valid for the wavelength window its grid
+     *  was sliced to -- without this a fit with a narrow window would poison
+     *  the cache for a later, wider one.                                    */
+    hash_combine(seed, window_key);
 
     return seed;
 }
@@ -98,8 +104,9 @@ Spectrum compute_synthetic(const ModelGrid&    grid,
     const double      lam_max  = lambda_obs.maxCoeff();
     const std::size_t lam_size = static_cast<std::size_t>(lambda_obs.size());
 
-    const std::size_t full_key =
+    std::size_t full_key =
         make_hash_full(pars, lam_min, lam_max, lam_size, resOffset, resSlope);
+    hash_combine(full_key, grid.window_key());
 
     //std::cout << "[CompSynth] Made Hash. Spectrum Cache." << std::endl;     
     /* ===== 2nd-level cache (final spectrum) ======================== */
@@ -108,7 +115,7 @@ Spectrum compute_synthetic(const ModelGrid&    grid,
 
             /* ===== 1st-level cache (surface spectrum with rotation) === */
             const std::size_t surf_key =
-                make_hash_surface(pars, resOffset, resSlope);
+                make_hash_surface(pars, resOffset, resSlope, grid.window_key());
 
             SpectrumPtr surf_sp = SpectrumCache::instance()
                 .insert_if_absent(surf_key, [&]{

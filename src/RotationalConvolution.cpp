@@ -5,6 +5,7 @@
 #include <numeric>
 #include <unordered_map>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <cassert>
 
@@ -74,9 +75,15 @@ private:
     using KeyList = std::list<GridCacheKey>;
     KeyList lru_list;
     
+    /*  Shared ownership, not a value: `get` used to hand back a full copy of
+     *  the weight structure (one small vector per model pixel) on every cache
+     *  hit, which showed up as ~12 % of a fit.  A shared_ptr also makes
+     *  eviction safe while a caller is still applying the weights.          */
+    using WeightsPtr = std::shared_ptr<const RotationalWeights>;
+
     // Map from key to (weights, iterator in lru_list)
-    std::unordered_map<GridCacheKey, 
-                       std::pair<RotationalWeights, KeyList::iterator>, 
+    std::unordered_map<GridCacheKey,
+                       std::pair<WeightsPtr, KeyList::iterator>,
                        GridCacheKeyHash> cache_map;
     
     mutable std::mutex mutex;
@@ -96,25 +103,24 @@ private:
     }
     
 public:
-    // Try to get weights from cache
-    bool get(const GridCacheKey& key, RotationalWeights& weights) {
+    // Try to get weights from cache; nullptr on a miss
+    WeightsPtr get(const GridCacheKey& key) {
         std::lock_guard<std::mutex> lock(mutex);
-        
+
         auto it = cache_map.find(key);
         if (it == cache_map.end()) {
-            return false;  // Cache miss
+            return nullptr;  // Cache miss
         }
-        
+
         // Cache hit - update LRU order
-        weights = it->second.first;
         move_to_front(key, it->second.second);
-        return true;
+        return it->second.first;
     }
-    
+
     // Put weights into cache
-    void put(const GridCacheKey& key, RotationalWeights weights) {
+    void put(const GridCacheKey& key, WeightsPtr weights) {
         std::lock_guard<std::mutex> lock(mutex);
-        
+
         auto it = cache_map.find(key);
         if (it != cache_map.end()) {
             // Key already exists - update and move to front
@@ -122,12 +128,12 @@ public:
             move_to_front(key, it->second.second);
             return;
         }
-        
+
         // Check if cache is full
         if (cache_map.size() >= MAX_CACHE_SIZE) {
             evict_lru();
         }
-        
+
         // Insert new entry at front of LRU list
         lru_list.push_front(key);
         cache_map[key] = {std::move(weights), lru_list.begin()};
@@ -313,20 +319,20 @@ Vector rotational_broaden(const Vector& lam,
     GridCacheKey key = make_grid_key(lam, vsini_kms, epsilon, n_kernel);
     
     // Try to get from cache
-    RotationalWeights weights;
-    if (g_weightCache.get(key, weights)) {
+    if (auto cached = g_weightCache.get(key)) {
         // Cache hit! Just apply precomputed weights
-        return apply_weights(flux, weights);
+        return apply_weights(flux, *cached);
     }
-    
+
     // Cache miss - compute weights
-    weights = compute_weights(lam, vsini_kms, epsilon, n_kernel);
-    
+    auto weights = std::make_shared<const RotationalWeights>(
+        compute_weights(lam, vsini_kms, epsilon, n_kernel));
+
     // Store in cache (will handle LRU eviction if needed)
     g_weightCache.put(key, weights);
-    
+
     // Apply weights
-    return apply_weights(flux, weights);
+    return apply_weights(flux, *weights);
 }
 
 /* ------------- Optional: Precompute weights for known grids ---------- */
@@ -338,8 +344,8 @@ void precompute_rotational_weights(const Vector& lam,
     GridCacheKey key = make_grid_key(lam, vsini_kms, epsilon, n_kernel);
     
     if (!g_weightCache.contains(key)) {
-        RotationalWeights weights = compute_weights(lam, vsini_kms, epsilon, n_kernel);
-        g_weightCache.put(key, std::move(weights));
+        g_weightCache.put(key, std::make_shared<const RotationalWeights>(
+            compute_weights(lam, vsini_kms, epsilon, n_kernel)));
     }
 }
 
