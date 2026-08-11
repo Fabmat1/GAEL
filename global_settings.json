@@ -25,6 +25,9 @@
         "convFraction": 0.9,
         "requireBlue": 0.0,
         "filter_snr": 5.0,
-        "contJitterK": 6
+        "contJitterK": 6,
+        "autoFreezeSurRatio": false,
+        "surRatioThres": 5.0,
+        "c2DetectionThres": 0.05
     }
 }

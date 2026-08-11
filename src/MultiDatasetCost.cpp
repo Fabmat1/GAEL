@@ -99,36 +99,66 @@ Vector MultiDatasetCost::continuum_of_dataset(const Eigen::VectorXd& p,
     return spline_continuum(ds.cont_x, Vector(cont_y), ds.lambda);
 }
 
+/* ------------------------------------------------------------------ *
+ *  The normalised model spectrum of one dataset.
+ *
+ *  One component is the ordinary case: the grid's normalised flux is the
+ *  model, full stop.
+ *
+ *  More than one component cannot be an average of normalised spectra --
+ *  a line of the secondary is diluted by the *continuum flux* of the
+ *  primary, which is a function of wavelength, not by a constant.  ISIS
+ *  therefore sums the calibrated fluxes weighted by the fitted surface
+ *  ratios and divides by the summed continua (spectroscopic_fitting.sl,
+ *  `f_uni /= c_uni`):
+ *
+ *      n(lambda) = sum_k s_k F_k(lambda) / sum_k s_k C_k(lambda)
+ *
+ *  with s_1 == 1 by definition.  ISIS forms that sum on the union of the
+ *  components' model grids and rebins the result onto the data bins; here
+ *  each component's F_k and C_k are rebinned onto the data bins first (the
+ *  same flux-conserving operator ISIS's rebinDensity applies) and the sum is
+ *  formed there, which keeps every component independently cacheable.  The
+ *  two differ only by mean(sum s F)/mean(sum s C) versus mean(sum s F/sum s C)
+ *  inside a single bin, and a continuum is flat across one bin.
+ * ------------------------------------------------------------------ */
 Vector MultiDatasetCost::synth_of_dataset(const Eigen::VectorXd& p,
                                           std::size_t            d) const
 {
     const auto& ds = datasets_[d];
     const int   np = static_cast<int>(ds.lambda.size());
+    const bool  composite = n_components_ > 1;
 
-    Vector synth  = Vector::Zero(np);
-    double w_sum  = 0.0;
+    Vector num = Vector::Zero(np);
+    Vector den = Vector::Zero(np);
 
     for (int c = 0; c < n_components_; ++c) {
         StellarParams sp;
         const int di = static_cast<int>(d);
-        sp.vrad  = p[indexer_.get(c,di,0)];
-        sp.vsini = p[indexer_.get(c,di,1)];
-        sp.zeta  = p[indexer_.get(c,di,2)];
-        sp.teff  = p[indexer_.get(c,di,3)];
-        sp.logg  = p[indexer_.get(c,di,4)];
-        sp.xi    = p[indexer_.get(c,di,5)];
-        sp.z     = p[indexer_.get(c,di,6)];
-        sp.he    = p[indexer_.get(c,di,7)];
+        sp.vrad      = p[indexer_.get(c,di,0)];
+        sp.vsini     = p[indexer_.get(c,di,1)];
+        sp.zeta      = p[indexer_.get(c,di,2)];
+        sp.teff      = p[indexer_.get(c,di,3)];
+        sp.logg      = p[indexer_.get(c,di,4)];
+        sp.xi        = p[indexer_.get(c,di,5)];
+        sp.z         = p[indexer_.get(c,di,6)];
+        sp.he        = p[indexer_.get(c,di,7)];
+        sp.sur_ratio = p[indexer_.get(c,di,8)];
 
         SpectrumPtr s = compute_synthetic_cached(*grids_[c], sp,
                                                   ds.lambda,
-                                                  ds.resOffset, ds.resSlope);
+                                                  ds.resOffset, ds.resSlope,
+                                                  composite);
 
-        const double w = std::pow(sp.teff, 4);
-        synth         += w * s->flux;
-        w_sum         += w;
+        if (!composite) return s->flux;      // already normalised
+
+        num += sp.sur_ratio * s->flux;
+        den += sp.sur_ratio * s->cont;
     }
-    if (w_sum > 0.0) synth.array() /= w_sum;
+
+    Vector synth(np);
+    for (int i = 0; i < np; ++i)
+        synth[i] = (den[i] > 0.0) ? num[i] / den[i] : 0.0;
     return synth;
 }
 

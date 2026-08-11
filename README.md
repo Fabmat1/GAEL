@@ -151,6 +151,57 @@ GAEL --global globals.json --fit run.json [--threads N]
 * `run.json`     – parameters of the individual fit  
 * `--threads N`  – override automatic core detection  
 
+### Multi-component (binary) fits
+
+The number of stellar components is the number of entries in `grids`, exactly
+as in ISIS, where it is the number of grids handed to
+`initialize_grid_fit_spectroscopy`. Each component's start values live under
+the `cN_` prefix in `initialGuess`:
+
+```jsonc
+{
+  "grids": ["sdB/processed/", "BG/processed/"],
+  "initialGuess": {
+    "c1_vrad": {"value":   0.0, "freeze": false},
+    "c1_teff": {"value": 25000.0, "freeze": false},
+    // ... c1_vsini, c1_zeta, c1_logg, c1_xi, c1_z, c1_HE
+
+    "c2_vrad": {"value":   0.0, "freeze": false},
+    "c2_teff": {"value": 15000.0, "freeze": false},
+    // ... c2_vsini, c2_zeta, c2_logg, c2_xi, c2_z, c2_HE
+
+    "c2_sur_ratio": {"value": 1.0, "freeze": false}
+  }
+}
+```
+
+`cN_sur_ratio` is the ratio of component *N*'s effective surface area to
+component 1's — ISIS's `sur_ratio`. It is optional (default 1, free) and, like
+the other stellar parameters, tied across spectra unless listed in
+`untieParams`. `c1_sur_ratio` defines the scale and is always 1 and frozen;
+the others are bounded to `[0, 1500]`, as `stellar_set_ranges` bounds them.
+
+The components are combined the way ISIS combines them: the *calibrated*
+model fluxes (the grid's `c` column) are summed with the surface ratios as
+weights and divided by the summed continua,
+
+```
+n(λ)  =  Σ s_k · F_k(λ)  /  Σ s_k · C_k(λ)
+```
+
+so a line of the secondary is diluted by the primary's continuum flux at that
+wavelength rather than by a constant. A one-component fit is unaffected and
+still uses the grid's normalised `f` column directly.
+
+Two optional `settings` keys mirror ISIS's `auto_freeze_sur_ratio`, which is
+**off by default here** (ISIS has it on):
+
+| key | default | effect |
+|---|---|---|
+| `autoFreezeSurRatio` | `false` | drop a second grid whose *initial* surface ratio is already at or below `surRatioThres` (or which names the same grid as the first), and, after the first full fit, retire a secondary whose fitted ratio fell below `surRatioThres` or whose peak contribution to the composite stayed below `c2DetectionThres` — setting its ratio to zero and freezing the whole component |
+| `surRatioThres` | `5.0` | ISIS's `sur_ratio_thres` |
+| `c2DetectionThres` | `0.05` | ISIS's `c2_detection_thres` |
+
 ---
 
 ## Troubleshooting

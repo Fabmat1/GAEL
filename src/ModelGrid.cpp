@@ -91,8 +91,9 @@ static double param_for_axis(const std::string& n,
 /* =================================================================== */
 Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                                   double he,double xi,double vsini,
-                                  double resOffset,double resSlope) const
-{   
+                                  double resOffset,double resSlope,
+                                  bool   with_continuum) const
+{
     //std::cout << "[LoadSpec] Building Interpolation Hypercube." << std::endl;
     /* ---------- build interpolation hyper-cube -------------------- */
     struct Node { double t,g,z,h,x,w; };
@@ -166,6 +167,7 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
         int Xi=int(std::lround(nd.x*100));
 
         Key k = pack(Ti,Gi,Zi,Hi,Xi);
+        k = hash_combine(k, hash_combine(0x5152A710ULL, std::size_t(with_continuum)));
         k = hash_combine(k, hash_double(vsini));      // Include vsini in cache key
         k = hash_combine(k, hash_double(resOffset));
         k = hash_combine(k, hash_double(resSlope));
@@ -190,7 +192,7 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                 e.sp = SpectrumCache::instance()
                          .insert_if_absent(k,[&]{
                              //std::cout << "[LoadSpec](fetch) Reading .fits ." << std::endl;
-                             Spectrum raw = read_fits(path);
+                             Spectrum raw = read_fits(path, with_continuum);
                              //std::cout << "[LoadSpec](fetch) Broadening." << vsini << std::endl;
 
                              // Apply rotational broadening FIRST
@@ -209,6 +211,12 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                              // kept even when no degradation is requested - otherwise
                              // vsini would be silently dropped at infinite resolution.
                              Spectrum result = raw;
+                             /*  ISIS never broadens the continuum -- it divides the
+                              *  broadened calibrated flux by the *unbroadened*
+                              *  continuum and only resamples the latter onto the
+                              *  convolved grid, which here is the same grid.  Keep
+                              *  the untouched calibrated flux as the numerator.   */
+                             if (with_continuum) result.cont = raw.flux;
                              result.flux = rot_flux;
                              if (resOffset != 0 || resSlope != 0){
                              result.flux = degrade_resolution(raw.lambda, rot_flux,
@@ -235,12 +243,35 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
         //std::cout << "[LoadSpec] Fetching Spec." << std::endl;
         const Spectrum& sp = fetch(nodes[i]);
         //std::cout << "[LoadSpec] Fetched." << std::endl;
-        if(first){ out = sp; out.flux.setZero(); first=false; }
+        if(first){
+            out = sp; out.flux.setZero();
+            if (with_continuum) { out.cont.setZero(); out.cont_den.setZero(); }
+            first=false;
+        }
         out.flux += sp.flux * nodes[i].w;
+        if (with_continuum) {
+            out.cont     += sp.cont     * nodes[i].w;
+            out.cont_den += sp.cont_den * nodes[i].w;
+        }
         wsum     += nodes[i].w;
     }
     //std::cout << "[LoadSpec] Done!" << std::endl;
     if(wsum>0.0) out.flux.array() /= wsum;
+
+    /*  The continuum is interp(c)/interp(f), not interp(c/f): ISIS forms the
+     *  ratio *after* interpolating both columns across the hypercube
+     *  (spectroscopic_fitting.sl, `c[k] = f[k]/interpol_syn(...)`).  The two
+     *  differ because the weights that mix the corners' continua are then the
+     *  corners' *line* depths, so the result carries a faint line imprint --
+     *  small, but it is what the reference does.                            */
+    if (with_continuum) {
+        if (wsum > 0.0) { out.cont.array() /= wsum; out.cont_den.array() /= wsum; }
+        for (Eigen::Index i = 0; i < out.cont.size(); ++i) {
+            const double d = out.cont_den[i];
+            out.cont[i] = (d > 0.0) ? out.cont[i] / d : 0.0;
+        }
+        out.cont_den.resize(0);          // scratch, never leaves this function
+    }
     return out;
 }
 
@@ -257,7 +288,7 @@ void ModelGrid::set_wavelength_window(double lambda_min, double lambda_max)
 /* ------------------------------------------------------------------ *
  *                read_fits()                                          *
  * ------------------------------------------------------------------ */
-Spectrum ModelGrid::read_fits(const std::string& path) const
+Spectrum ModelGrid::read_fits(const std::string& path, bool with_continuum) const
 {
     using Vec = std::vector<Real>;
     /*  Corner spectra are read from several OpenMP threads at once
@@ -286,7 +317,13 @@ Spectrum ModelGrid::read_fits(const std::string& path) const
     CCfits::FITS f(path, CCfits::Read);
     CCfits::ExtHDU& ext = f.extension(1);
 
-    Vec fl; ext.column("f").read(fl,1,ext.rows());
+    /*  Column "f" is the normalised flux, column "c" the flux-calibrated one
+     *  (SURFACE, erg/s/cm^2/A) -- ISIS's `nonorm` qualifier picks "c".  A
+     *  binary fit is built from "c" and keeps "f" as the divisor that turns
+     *  it into a continuum; a single-component fit only ever needs "f".     */
+    Vec fl; ext.column(with_continuum ? "c" : "f").read(fl,1,ext.rows());
+    Vec fn;
+    if (with_continuum) ext.column("f").read(fn,1,ext.rows());
     if(lam.size()==0){
         Vec lt; ext.column("l").read(lt,1,ext.rows());
         lam = Eigen::Map<Vector>(lt.data(),lt.size());
@@ -317,6 +354,8 @@ Spectrum ModelGrid::read_fits(const std::string& path) const
     sp.lambda = lam.segment(i0, n);
     sp.flux   = Eigen::Map<Vector>(fl.data(), fl.size()).segment(i0, n);
     sp.sigma  = Vector::Ones(n);
+    if (with_continuum)
+        sp.cont_den = Eigen::Map<Vector>(fn.data(), fn.size()).segment(i0, n);
     return sp;
 }
 

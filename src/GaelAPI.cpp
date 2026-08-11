@@ -330,24 +330,50 @@ FitResult GaelSession::run()
     FitResult R;
 
     // ---- build grids & initial params ---------------------------------------
+    /*  More than one grid path == more than one stellar component.  ISIS's
+     *  auto_freeze_sur_ratio additionally drops the second grid up front when
+     *  its initial surface ratio is already below threshold, or when both
+     *  paths name the same grid (spectroscopy_automated.sl ~384-410).  Note
+     *  that this fires on ISIS's own default of 1, so with that setting on, a
+     *  binary fit only happens if the config asks for a ratio above the
+     *  threshold; that is exactly why it is opt-in here.                     */
+    std::vector<StellarComponentInit> comps = fi.components;
+    if (gs.auto_freeze_sur_ratio && comps.size() == 2) {
+        const bool same_grid = comps[0].grid_relative_path ==
+                               comps[1].grid_relative_path;
+        if (same_grid || comps[1].sur_ratio <= gs.sur_ratio_thres) {
+            log(std::string("auto_freeze_sur_ratio: dropping component 2 (") +
+                (same_grid ? "same grid as component 1"
+                           : "initial sur_ratio <= " +
+                             std::to_string(gs.sur_ratio_thres)) + ")");
+            comps.resize(1);
+        }
+    }
+
     SharedModel model;
-    for (const auto& c : fi.components)
+    for (const auto& c : comps)
         model.grids.emplace_back(gs.base_paths, c.grid_relative_path);
 
-    model.params.resize(fi.components.size());
-    std::vector<std::map<std::string,bool>> frozen(fi.components.size());
+    model.params.resize(comps.size());
+    std::vector<std::map<std::string,bool>> frozen(comps.size());
 
-    for (std::size_t c = 0; c < fi.components.size(); ++c) {
-        const auto& ci = fi.components[c];
+    for (std::size_t c = 0; c < comps.size(); ++c) {
+        const auto& ci = comps[c];
         auto&       sp = model.params[c];
         sp.vrad=ci.vrad;   sp.vsini=ci.vsini; sp.zeta=ci.zeta;
         sp.teff=ci.teff;   sp.logg=ci.logg;   sp.xi=ci.xi;
         sp.z   =ci.z;      sp.he  =ci.he;
 
+        /*  Component 1 defines the scale: its surface ratio is 1 and frozen,
+         *  as in ISIS's stellar_default (value 1, freeze 1, min=max=1).     */
+        sp.sur_ratio = (c == 0) ? 1.0 : ci.sur_ratio;
+
         frozen[c]["vrad"] =ci.freeze_vrad;   frozen[c]["vsini"]=ci.freeze_vsini;
         frozen[c]["zeta"] =ci.freeze_zeta;   frozen[c]["teff"] =ci.freeze_teff;
         frozen[c]["logg"] =ci.freeze_logg;   frozen[c]["xi"]   =ci.freeze_xi;
         frozen[c]["z"]    =ci.freeze_z;      frozen[c]["he"]   =ci.freeze_he;
+        frozen[c]["sur_ratio"] =
+            (c == 0 || comps.size() == 1) ? true : ci.freeze_sur_ratio;
     }
 
     // ---- preprocess every file ---------------------------------------------
@@ -405,6 +431,9 @@ FitResult GaelSession::run()
     wcfg.conv_range_lo     = gs.conv_range_lo;
     wcfg.conv_range_hi     = gs.conv_range_hi;
     wcfg.conv_fraction     = gs.conv_fraction;
+    wcfg.auto_freeze_sur_ratio = gs.auto_freeze_sur_ratio;
+    wcfg.sur_ratio_thres   = gs.sur_ratio_thres;
+    wcfg.c2_detection_thres= gs.c2_detection_thres;
     wcfg.on_stage_complete = gs.on_stage_complete;
 
 
@@ -435,17 +464,20 @@ FitResult GaelSession::run()
                != gs.untie_params.end();
     };
 
-    // same parameter ordering as ParameterIndexer (vrad, vsini, zeta, teff, logg, xi, z, he)
-    const char* pnames[8] = { "vrad","vsini","zeta","teff","logg","xi","z","he" };
+    // same parameter ordering as ParameterIndexer
+    // (vrad, vsini, zeta, teff, logg, xi, z, he, sur_ratio)
+    constexpr int NP = ::specfit::ParameterIndexer::kNStellarParams;
+    const char* pnames[NP] = { "vrad","vsini","zeta","teff","logg","xi","z","he",
+                               "sur_ratio" };
 
     R.components.assign(n_comp, {});
     for (int c = 0; c < n_comp; ++c) {
         auto& cr = R.components[c];
-        std::array<std::vector<StellarParamResult>*, 8> slots = {
+        std::array<std::vector<StellarParamResult>*, NP> slots = {
             &cr.vrad, &cr.vsini, &cr.zeta, &cr.teff,
-            &cr.logg, &cr.xi,    &cr.z,    &cr.he
+            &cr.logg, &cr.xi,    &cr.z,    &cr.he, &cr.sur_ratio
         };
-        for (int p = 0; p < 8; ++p) {
+        for (int p = 0; p < NP; ++p) {
             const int reps = is_untied(pnames[p]) ? n_ds : 1;
             for (int d = 0; d < reps; ++d) {
                 const int gidx = idx.get(c, d, p);
@@ -495,26 +527,27 @@ FitResult GaelSession::run()
     // iterative-noise rejection, no Powell). Far cheaper than a full re-fit.
     if (gs.cont_jitter_K > 0 && !R.components.empty()) {
         using Slot = std::vector<StellarParamResult> ComponentResult::*;
-        const std::array<Slot,8> slots = {
+        const std::array<Slot,NP> slots = {
             &ComponentResult::vrad, &ComponentResult::vsini,
             &ComponentResult::zeta, &ComponentResult::teff,
             &ComponentResult::logg, &ComponentResult::xi,
-            &ComponentResult::z,    &ComponentResult::he };
+            &ComponentResult::z,    &ComponentResult::he,
+            &ComponentResult::sur_ratio };
 
-        std::vector<std::array<std::vector<std::vector<double>>,8>>
+        std::vector<std::array<std::vector<std::vector<double>>,NP>>
             acc(R.components.size());
         for (std::size_t c = 0; c < R.components.size(); ++c)
-            for (int p = 0; p < 8; ++p)
+            for (int p = 0; p < NP; ++p)
                 acc[c][p].resize((R.components[c].*slots[p]).size());
 
         const std::vector<StellarParams> warm = model.params;  // converged fit
-        const char* pn[8] = {"vrad","vsini","zeta","teff","logg","xi","z","he"};
+        const char* const* pn = pnames;
 
         // Freeze in the ensemble exactly what the main fit ended frozen on
         // (e.g. vsini auto-frozen in stage 5), so the refits match the solution.
         std::vector<std::map<std::string,bool>> frozen_ens = frozen;
         for (std::size_t c = 0; c < R.components.size() && c < frozen_ens.size(); ++c)
-            for (int p = 0; p < 8; ++p) {
+            for (int p = 0; p < NP; ++p) {
                 const auto& vec = (R.components[c].*slots[p]);
                 if (!vec.empty()) frozen_ens[c][pn[p]] = vec[0].frozen;
             }
@@ -546,7 +579,7 @@ FitResult GaelSession::run()
                     return std::find(gs.untie_params.begin(), gs.untie_params.end(),
                                      std::string(n)) != gs.untie_params.end(); };
                 for (std::size_t c = 0; c < acc.size(); ++c)
-                    for (int pp = 0; pp < 8; ++pp) {
+                    for (int pp = 0; pp < NP; ++pp) {
                         const int reps = is_untied(pn[pp]) ? (int)datasets.size() : 1;
                         for (int d = 0; d < reps && (std::size_t)d < acc[c][pp].size(); ++d)
                             acc[c][pp][d].push_back(p[ji.get((int)c,d,pp)]);
@@ -557,7 +590,7 @@ FitResult GaelSession::run()
 
         // fold the ensemble scatter into the reported errors (quadrature)
         for (std::size_t c = 0; c < R.components.size(); ++c)
-            for (int p = 0; p < 8; ++p)
+            for (int p = 0; p < NP; ++p)
                 for (std::size_t d = 0; d < acc[c][p].size(); ++d) {
                     const auto& v = acc[c][p][d];
                     if (v.size() < 2) continue;

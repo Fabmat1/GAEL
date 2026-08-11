@@ -44,6 +44,10 @@ GlobalSettings global_settings_from_json_file(const std::string& path)
     get_d("convFraction",   gs.conv_fraction);
     get_i("contJitterK",    gs.cont_jitter_K);
 
+    get_b("autoFreezeSurRatio", gs.auto_freeze_sur_ratio);
+    get_d("surRatioThres",      gs.sur_ratio_thres);
+    get_d("c2DetectionThres",   gs.c2_detection_thres);
+
     return gs;
 }
 
@@ -76,6 +80,17 @@ FitInput fit_input_from_json_file(const std::string& path)
         comp.xi    = pv("xi");     comp.freeze_xi    = pf("xi");
         comp.z     = pv("z");      comp.freeze_z     = pf("z");
         comp.he    = pv("HE");     comp.freeze_he    = pf("HE");
+
+        /*  cN_sur_ratio is optional: single-component configs never had one,
+         *  and for a binary the ISIS defaults (1, free) are the sensible
+         *  start.  Component 1's is pinned to 1 whatever the file says.     */
+        comp.sur_ratio        = 1.0;
+        comp.freeze_sur_ratio = (c == 0);
+        if (c > 0 && ig.contains(pre + "sur_ratio")) {
+            const auto& sr = ig.at(pre + "sur_ratio");
+            if (sr.contains("value"))  comp.sur_ratio        = sr["value"].get<double>();
+            if (sr.contains("freeze")) comp.freeze_sur_ratio = sr["freeze"].get<bool>();
+        }
     }
 
     if (j.contains("outputPath"))

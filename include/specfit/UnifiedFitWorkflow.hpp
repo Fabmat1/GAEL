@@ -32,6 +32,16 @@ public:
         double conv_range_hi            = 1.1;
         double conv_fraction            = 0.9;
 
+        /*  ISIS's auto_freeze_sur_ratio (on by default there, off here --
+         *  GAEL only ever drops a component the user asked for if the user
+         *  asked for that too).  When on, a secondary whose surface ratio or
+         *  whose peak contribution to the composite falls below the
+         *  thresholds below is retired: its surface ratio is set to zero and
+         *  every one of its parameters is frozen.                           */
+        bool   auto_freeze_sur_ratio    = false;
+        double sur_ratio_thres          = 5.0;    // ISIS: sur_ratio_thres
+        double c2_detection_thres       = 0.05;   // ISIS: c2_detection_thres
+
         // Called at the end of every fitting stage if set.
         // stage_index: 0-based counter across all solve_stage() calls.
         // Implementation-defined usage: the CLI hooks MultiPanelPlotter here.
@@ -79,6 +89,7 @@ private:
     void stage3_continuum_vrad_teff_logg_z();
     void stage4_full(bool add_powell = false);
     void stage5_auto_freeze_vsini();
+    void stage5b_auto_freeze_sur_ratio();
     void stage6_rescale_and_reject();
     void stage7_final();
     

@@ -253,8 +253,9 @@ void generate_results(const std::string&              out_dir,
     }
     
     /* --- now all stellar parameters ----------------------------------- */
-    const char* tags[8] = {"vrad","vsini","zeta","teff",
-                           "logg","xi","z","he"};
+    constexpr int NP = ParameterIndexer::kNStellarParams;
+    const char* tags[NP] = {"vrad","vsini","zeta","teff",
+                            "logg","xi","z","he","sur_ratio"};
     const int   n_comp  = model.params.size();
     const int   n_spec  = datasets.size();
     
@@ -267,7 +268,7 @@ void generate_results(const std::string&              out_dir,
     
     for (int c = 0; c < n_comp; ++c)
     {
-        for (int k = 0; k < 8; ++k)
+        for (int k = 0; k < NP; ++k)
         {
             const std::string tag = tags[k];
             const bool untied = is_untied(tag);

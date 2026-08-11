@@ -29,7 +29,9 @@ struct DatasetInfo {
 /* ------------------------------------------------------------------------- */
 class MultiDatasetCost {
 public:
-    static constexpr int kStellarParamsPerComp = 8;   // kept for legacy bounds
+    /* kept for legacy bounds; tracks the indexer so it cannot drift */
+    static constexpr int kStellarParamsPerComp =
+        ParameterIndexer::kNStellarParams;
 
     MultiDatasetCost(const std::vector<DatasetInfo>& datasets,
                      const std::vector<ModelGrid*>&  grids,

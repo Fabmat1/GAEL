@@ -35,9 +35,14 @@ inline std::size_t make_hash_full(const StellarParams& p,
                                   double               lam_max,
                                   std::size_t          lam_sz,
                                   double               resOffset,
-                                  double               resSlope)
+                                  double               resSlope,
+                                  bool                 with_continuum)
 {
     std::size_t seed = 0xF00DBAA5FULL;  // domain separator
+
+    /*  Two different spectra live under otherwise identical parameters: the
+     *  normalised one and the calibrated-flux-plus-continuum pair.          */
+    hash_combine(seed, with_continuum);
 
     hash_combine(seed, p.vrad);
     hash_combine(seed, p.vsini);
@@ -64,9 +69,12 @@ inline std::size_t make_hash_full(const StellarParams& p,
 inline std::size_t make_hash_surface(const StellarParams& p,
                                      double               resOffset,
                                      double               resSlope,
-                                     std::size_t          window_key)
+                                     std::size_t          window_key,
+                                     bool                 with_continuum)
 {
     std::size_t seed = 0xBADA555EULL;   // different domain separator
+
+    hash_combine(seed, with_continuum);
 
     hash_combine(seed, p.teff);
     hash_combine(seed, p.logg);
@@ -95,7 +103,8 @@ SpectrumPtr compute_synthetic_cached(const ModelGrid&    grid,
                                      const StellarParams& pars,
                                      const Vector&        lambda_obs,
                                      double               resOffset,
-                                     double               resSlope)
+                                     double               resSlope,
+                                     bool                 with_continuum)
 {
     //std::cout << "[CompSynth] Entering Function" << std::endl;  
     //std::cout << "[CompSynth] Making Hash." << std::endl;               
@@ -105,7 +114,8 @@ SpectrumPtr compute_synthetic_cached(const ModelGrid&    grid,
     const std::size_t lam_size = static_cast<std::size_t>(lambda_obs.size());
 
     std::size_t full_key =
-        make_hash_full(pars, lam_min, lam_max, lam_size, resOffset, resSlope);
+        make_hash_full(pars, lam_min, lam_max, lam_size, resOffset, resSlope,
+                       with_continuum);
     hash_combine(full_key, grid.window_key());
 
     //std::cout << "[CompSynth] Made Hash. Spectrum Cache." << std::endl;     
@@ -115,7 +125,8 @@ SpectrumPtr compute_synthetic_cached(const ModelGrid&    grid,
 
             /* ===== 1st-level cache (surface spectrum with rotation) === */
             const std::size_t surf_key =
-                make_hash_surface(pars, resOffset, resSlope, grid.window_key());
+                make_hash_surface(pars, resOffset, resSlope, grid.window_key(),
+                                  with_continuum);
 
             SpectrumPtr surf_sp = SpectrumCache::instance()
                 .insert_if_absent(surf_key, [&]{
@@ -123,7 +134,8 @@ SpectrumPtr compute_synthetic_cached(const ModelGrid&    grid,
                     return grid.load_spectrum(pars.teff, pars.logg,
                                                pars.z,   pars.he,
                                                pars.xi,  pars.vsini,
-                                               resOffset, resSlope);
+                                               resOffset, resSlope,
+                                               with_continuum);
                 });
             const Spectrum& surf = *surf_sp;      // safe reference
             //std::cout << "[CompSynth] Got Cached Spectrum. Doppler Shift." << std::endl;   
@@ -141,12 +153,18 @@ SpectrumPtr compute_synthetic_cached(const ModelGrid&    grid,
             //Vector interp = interp_linear(lam_shift, surf.flux, lambda_obs);
             Vector interp = trapezoidal_rebin(lam_shift, surf.flux, lambda_obs);
 
-            //std::cout << "[CompSynth] Interpolated. Finishing up." << std::endl;   
+            //std::cout << "[CompSynth] Interpolated. Finishing up." << std::endl;
             /* 3) pack the final synthetic spectrum */
             Spectrum out;
             out.lambda = lambda_obs;
             out.flux   = std::move(interp);
             out.sigma  = Vector::Ones(lambda_obs.size());
+
+            /*  The continuum rides along through the same shift and rebin, so
+             *  that a caller mixing components can weight flux and continuum
+             *  consistently bin by bin.                                      */
+            if (with_continuum)
+                out.cont = trapezoidal_rebin(lam_shift, surf.cont, lambda_obs);
 
             return out;    // moved into cache (as shared_ptr target)
         });
@@ -158,10 +176,11 @@ Spectrum compute_synthetic(const ModelGrid&    grid,
                            const StellarParams& pars,
                            const Vector&        lambda_obs,
                            double               resOffset,
-                           double               resSlope)
+                           double               resSlope,
+                           bool                 with_continuum)
 {
     return *compute_synthetic_cached(grid, pars, lambda_obs,
-                                     resOffset, resSlope);
+                                     resOffset, resSlope, with_continuum);
 }
 
 /* ------------------------------------------------------------------ *

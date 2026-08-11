@@ -10,6 +10,12 @@
  *  Stellar parameter order:
  *      0 vrad   1 vsini   2 zeta   3 teff
  *      4 logg   5 xi      6 z      7 he
+ *      8 sur_ratio
+ *
+ *  `sur_ratio` is the surface-area ratio of this component to the first one
+ *  and only does anything in a multi-component fit; component 1's is pinned
+ *  to 1 by definition.  It sits last, matching ISIS's ordering within a
+ *  component, and is tied across datasets by default like the rest.
  */
 
 #include <vector>
@@ -22,7 +28,7 @@ namespace specfit {
 
 class ParameterIndexer {
 public:
-    static constexpr int kNStellarParams = 8;
+    static constexpr int kNStellarParams = 9;
 
     /* idx[component][dataset][param] → global index */
     std::vector<std::vector<std::array<int, kNStellarParams>>> idx;
@@ -49,7 +55,7 @@ public:
         };
 
         const char* names[kNStellarParams] =
-            { "vrad","vsini","zeta","teff","logg","xi","z","he" };
+            { "vrad","vsini","zeta","teff","logg","xi","z","he","sur_ratio" };
 
         idx.resize(n_components);
         for (int c = 0; c < n_components; ++c)

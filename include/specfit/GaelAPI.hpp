@@ -34,6 +34,15 @@ struct GlobalSettings {
     bool   auto_freeze_vsini = true;
     std::vector<std::string> untie_params = {"vrad"};
 
+    /*  Multi-component fits: ISIS's auto_freeze_sur_ratio, which drops a
+     *  second grid whose initial surface ratio is already below threshold and
+     *  retires a secondary the converged fit cannot detect.  ISIS has this on
+     *  by default; here it is opt-in, so that "two grids" always means "fit
+     *  two components" unless the config says otherwise.                    */
+    bool   auto_freeze_sur_ratio = false;
+    double sur_ratio_thres       = 5.0;    // ISIS: sur_ratio_thres
+    double c2_detection_thres    = 0.05;   // ISIS: c2_detection_thres
+
     // iterative-noise / outlier rejection (stage 6)
     int    nit_noise_max  = 5;
     int    nit_fit_max    = 5;
@@ -74,6 +83,13 @@ struct StellarComponentInit {
     bool freeze_vrad=false, freeze_vsini=false, freeze_zeta=true;
     bool freeze_teff=false, freeze_logg=false, freeze_xi=true;
     bool freeze_z=false,    freeze_he=false;
+
+    /*  Ratio of this component's effective surface area to component 1's.
+     *  Component 1's is 1 and frozen by definition (as in ISIS); the defaults
+     *  here are ISIS's stellar_default for cN, N>1.  Only used when more than
+     *  one grid is given.                                                    */
+    double sur_ratio = 1.0;
+    bool   freeze_sur_ratio = false;
     // Trivially destructible (only POD + std::string). Implicit special
     // members are fine.
 };
@@ -135,7 +151,8 @@ struct StellarParamResult {
 
 struct ComponentResult {
     // each of these may be 1 (tied) or n_spectra (untied) long
-    std::vector<StellarParamResult> vrad, vsini, zeta, teff, logg, xi, z, he;
+    std::vector<StellarParamResult> vrad, vsini, zeta, teff, logg, xi, z, he,
+                                    sur_ratio;
 
     ComponentResult();
     ~ComponentResult();

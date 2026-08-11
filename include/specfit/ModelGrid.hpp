@@ -20,6 +20,12 @@ public:
               const std::string& rel_path);
     explicit ModelGrid(std::string abs_path);
 
+    /*  `with_continuum` switches to the representation a multi-component fit
+     *  needs (ISIS's `nonorm` path): the returned `flux` is the *calibrated*
+     *  surface flux (FITS column "c", broadened) instead of the normalised
+     *  one, and `cont` carries the component's continuum, interp(c)/interp(f)
+     *  over the hypercube corners.  Single-component fits leave it false and
+     *  get exactly what they always got.                                    */
     Spectrum load_spectrum(double teff,
                            double logg,
                            double z,
@@ -27,7 +33,8 @@ public:
                            double xi,
                            double vsini,     // Added vsini parameter
                            double resOffset,
-                           double resSlope) const;
+                           double resSlope,
+                           bool   with_continuum = false) const;
 
     const std::vector<GridAxis>& axes() const { return axes_; }
 
@@ -110,7 +117,7 @@ private:
     double      window_hi_  =  std::numeric_limits<double>::infinity();
     std::size_t window_key_ = 0;
 
-    Spectrum read_fits(const std::string& path) const;
+    Spectrum read_fits(const std::string& path, bool with_continuum) const;
 };
 
 } // namespace specfit

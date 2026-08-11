@@ -80,9 +80,11 @@ bool SpectrumCache::fetch(std::size_t hash, Spectrum& out) const
 std::size_t SpectrumCache::footprint_(const Spectrum& s)
 {
     return sizeof(Spectrum)
-         + static_cast<std::size_t>(s.lambda.size() +
-                                    s.flux.size()   +
-                                    s.sigma.size()) * sizeof(Real)
+         + static_cast<std::size_t>(s.lambda.size()   +
+                                    s.flux.size()     +
+                                    s.sigma.size()    +
+                                    s.cont.size()     +
+                                    s.cont_den.size()) * sizeof(Real)
          + s.ignoreflag.size() * sizeof(int);
 }
 

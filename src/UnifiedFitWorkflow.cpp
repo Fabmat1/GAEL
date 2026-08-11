@@ -86,6 +86,7 @@ UnifiedFitWorkflow::UnifiedFitWorkflow(
             unified_params_[ indexer_.get(c,d,5) ] = sp.xi   ;
             unified_params_[ indexer_.get(c,d,6) ] = sp.z    ;
             unified_params_[ indexer_.get(c,d,7) ] = sp.he   ;
+            unified_params_[ indexer_.get(c,d,8) ] = sp.sur_ratio;
         }
     }
     for (const auto& ds : datasets_)
@@ -105,8 +106,9 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
     const int n_components  = static_cast<int>(model_.params.size());
     const int stellar_total = indexer_.total_stellar_params;
 
-    const char* names[8] = {"vrad","vsini","zeta","teff",
-        "logg","xi","z","he"};
+    constexpr int NP = ParameterIndexer::kNStellarParams;
+    const char* names[NP] = {"vrad","vsini","zeta","teff",
+        "logg","xi","z","he","sur_ratio"};
 
     std::vector<DatasetInfo> ds_infos;
     std::vector<ModelGrid*>  grid_ptrs;
@@ -207,6 +209,12 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
             idx = indexer_.get(c, static_cast<int>(d), 7);
             lo[idx] = grid_bounds.he_min;
             hi[idx] = grid_bounds.he_max;
+
+            /* sur_ratio: component 1 defines the scale and is pinned to 1;
+               the others get ISIS's range (stellar_set_ranges: 0 .. 1500). */
+            idx = indexer_.get(c, static_cast<int>(d), 8);
+            if (c == 0) { lo[idx] = 1.0; hi[idx] = 1.0; }
+            else        { lo[idx] = 0.0; hi[idx] = 1500.0; }
         }
     }
 
@@ -242,11 +250,18 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
 
         auto token = [&](const std::string& name){ return "c"+std::to_string(c+1)+"_"+name; };
         for (std::size_t d = 0; d < datasets_.size(); ++d)
-            for (int p = 0; p < 8; ++p)
+            for (int p = 0; p < NP; ++p)
             {
                 if (!(all_requested ||
                       free_params.count(token(names[p])))) continue;
                 if (frz.at(names[p])) continue;
+                /*  c1_sur_ratio *defines* the scale the other components are
+                 *  measured against, so it is 1 by construction, never a
+                 *  degree of freedom -- ISIS pins it the same way
+                 *  (min=max=1, frozen).  A single-component fit therefore has
+                 *  no free surface ratio at all, which is what keeps its
+                 *  otherwise identically-zero Jacobian column out of JtJ.   */
+                if (p == 8 && c == 0) continue;
                 mark_free(indexer_.get(c,static_cast<int>(d),p));
             }
     }
@@ -351,7 +366,7 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
             // Decode which parameter this is
             for (int c = 0; c < n_components && comp < 0; ++c) {
                 for (int d = 0; d < static_cast<int>(datasets_.size()); ++d) {
-                    for (int p = 0; p < 8; ++p) {
+                    for (int p = 0; p < NP; ++p) {
                         if (indexer_.get(c, d, p) == i) {
                             comp = c; dataset = d; param_type = p;
                             break;
@@ -457,6 +472,7 @@ void UnifiedFitWorkflow::quick_refit(int max_iterations)
         model_.params[c].xi    = unified_params_[ indexer_.get(c,0,5) ];
         model_.params[c].z     = unified_params_[ indexer_.get(c,0,6) ];
         model_.params[c].he    = unified_params_[ indexer_.get(c,0,7) ];
+        model_.params[c].sur_ratio = unified_params_[ indexer_.get(c,0,8) ];
     }
 }
 
@@ -529,6 +545,98 @@ void UnifiedFitWorkflow::stage5_auto_freeze_vsini()
     }
 }
 
+
+/* ------------------------------------------------------------------------- *
+ *  Retire a secondary that the data cannot see.
+ *
+ *  ISIS's auto_freeze_sur_ratio (spectroscopy_automated.sl ~1157-1180): after
+ *  the first free fit it measures each component's peak share of the
+ *  composite,
+ *
+ *      contribution_k = max_lambda  s_k F_k(lambda) / sum_j s_j C_j(lambda)
+ *
+ *  and, if the fitted surface ratio came out below `sur_ratio_thres` or that
+ *  share stayed below `c2_detection_thres`, sets the surface ratio to zero
+ *  and freezes the whole component ("Freezing c2 contribution to zero").
+ *
+ *  It matters that the *whole* component is frozen, not just its surface
+ *  ratio: at s_k = 0 that component's spectrum drops out of the residuals
+ *  entirely, so every one of its other parameters has an identically-zero
+ *  Jacobian column and JtJ is singular in eight directions at once.
+ *
+ *  Unlike ISIS this is off unless the config asks for it -- see
+ *  Config::auto_freeze_sur_ratio.
+ * ------------------------------------------------------------------------- */
+void UnifiedFitWorkflow::stage5b_auto_freeze_sur_ratio()
+{
+    const int n_components = static_cast<int>(model_.params.size());
+    if (!config_.auto_freeze_sur_ratio || n_components < 2) return;
+
+    /* ---- peak contribution of every component, over all spectra -------- */
+    std::vector<double> contribution(n_components, 0.0);
+
+    for (std::size_t d = 0; d < datasets_.size(); ++d) {
+        const auto& ds  = datasets_[d];
+        const int   np  = static_cast<int>(ds.obs.lambda.size());
+        const int   did = static_cast<int>(d);
+
+        std::vector<Vector> flux(n_components);
+        Vector den = Vector::Zero(np);
+
+        for (int c = 0; c < n_components; ++c) {
+            StellarParams sp;
+            sp.vrad      = unified_params_[indexer_.get(c,did,0)];
+            sp.vsini     = unified_params_[indexer_.get(c,did,1)];
+            sp.zeta      = unified_params_[indexer_.get(c,did,2)];
+            sp.teff      = unified_params_[indexer_.get(c,did,3)];
+            sp.logg      = unified_params_[indexer_.get(c,did,4)];
+            sp.xi        = unified_params_[indexer_.get(c,did,5)];
+            sp.z         = unified_params_[indexer_.get(c,did,6)];
+            sp.he        = unified_params_[indexer_.get(c,did,7)];
+            sp.sur_ratio = unified_params_[indexer_.get(c,did,8)];
+
+            Spectrum syn = compute_synthetic(model_.grids[c], sp, ds.obs.lambda,
+                                             ds.resOffset, ds.resSlope,
+                                             /*with_continuum=*/true);
+            flux[c] = sp.sur_ratio * syn.flux;
+            den    += sp.sur_ratio * syn.cont;
+        }
+
+        for (int c = 0; c < n_components; ++c)
+            for (int i = 0; i < np; ++i) {
+                if (!ds.obs.ignoreflag[i] || den[i] <= 0.0) continue;
+                contribution[c] = std::max(contribution[c], flux[c][i] / den[i]);
+            }
+    }
+
+    std::cout << "[Stage 5b] Max. contributions:";
+    for (int c = 0; c < n_components; ++c)
+        std::cout << " c" << (c + 1) << '=' << std::fixed << std::setprecision(3)
+                  << contribution[c];
+    std::cout << " (thres=" << config_.c2_detection_thres << ").\n";
+
+    /* ---- retire the undetected ones ------------------------------------ */
+    bool froze_any = false;
+    const char* names[ParameterIndexer::kNStellarParams] =
+        {"vrad","vsini","zeta","teff","logg","xi","z","he","sur_ratio"};
+
+    for (int c = 1; c < n_components; ++c) {
+        if (frozen_status_[c].at("sur_ratio")) continue;   // user already fixed it
+        const double sr = unified_params_[indexer_.get(c,0,8)];
+        if (!(sr < config_.sur_ratio_thres ||
+              contribution[c] <= config_.c2_detection_thres)) continue;
+
+        std::cout << "[Stage 5b] Freezing c" << (c + 1)
+                  << " contribution to zero.\n";
+        for (std::size_t d = 0; d < datasets_.size(); ++d)
+            unified_params_[indexer_.get(c,static_cast<int>(d),8)] = 0.0;
+        for (const char* n : names) frozen_status_[c][n] = true;
+        froze_any = true;
+    }
+
+    if (froze_any)
+        solve_stage({ "all", "continuum" }, 100);
+}
 
 /* ------------------------------------------------------------------------- */
 /*  Stage-4 : iterative noise re-scaling  +  outlier rejection (fast IRLS)   */
@@ -723,7 +831,12 @@ void UnifiedFitWorkflow::stage7_final() {
             {grid_bounds.z_min, grid_bounds.z_max},        // z
             {grid_bounds.he_min, grid_bounds.he_max}       // he
         };
-        
+
+        /*  sur_ratio is deliberately not in this list.  Freezing it alone at
+         *  its lower bound of 0 would leave the rest of that component free
+         *  while contributing nothing, i.e. eight exactly-zero Jacobian
+         *  columns.  A vanishing component is retired as a whole, by
+         *  stage5b_auto_freeze_sur_ratio.                                    */
         for (int p = 0; p < 8; ++p) {
             // Skip if already frozen
             if (frozen_status_[c].at(names[p])) continue;
@@ -855,6 +968,10 @@ void UnifiedFitWorkflow::run()
     }
     std::cout << "[Stage 4] First Full Fit ...\n"; stage4_full(); mark("stage4");
     std::cout << "[Stage 5] Auto-freeze vsini if unmeasurable ...\n"; stage5_auto_freeze_vsini(); mark("stage5");
+    if (config_.auto_freeze_sur_ratio && model_.params.size() > 1) {
+        std::cout << "[Stage 5b] Auto-freeze undetected components ...\n";
+        stage5b_auto_freeze_sur_ratio(); mark("stage5b");
+    }
     if (do_6) { std::cout << "[Stage 6] Iterative Noise Rescaling and Outlier Rejection ...\n"; stage6_rescale_and_reject(); mark("stage6"); }
     std::cout << "[Stage 7] Final Fit ...\n"; stage7_final(); mark("stage7");
     final_uncertainties_ = summary_.param_uncertainties;
@@ -869,6 +986,7 @@ void UnifiedFitWorkflow::run()
         model_.params[c].xi    = unified_params_[ indexer_.get(c,0,5) ];
         model_.params[c].z     = unified_params_[ indexer_.get(c,0,6) ];
         model_.params[c].he    = unified_params_[ indexer_.get(c,0,7) ];
+        model_.params[c].sur_ratio = unified_params_[ indexer_.get(c,0,8) ];
     }
 }
 
@@ -893,6 +1011,7 @@ Vector UnifiedFitWorkflow::get_model_for_dataset(size_t dataset_idx) const {
         stellar[c].xi    = unified_params_[ indexer_.get(c,didx,5) ];
         stellar[c].z     = unified_params_[ indexer_.get(c,didx,6) ];
         stellar[c].he    = unified_params_[ indexer_.get(c,didx,7) ];
+        stellar[c].sur_ratio = unified_params_[ indexer_.get(c,didx,8) ];
     }
     
     /* -------- continuum anchors live in ONE big block at the very end --- */
@@ -913,24 +1032,30 @@ Vector UnifiedFitWorkflow::get_model_for_dataset(size_t dataset_idx) const {
     AkimaSpline cont_spline(ds.cont_x, cont_y);
     Vector continuum = cont_spline(ds.obs.lambda);
     
-    // Compute synthetic spectrum
+    // Compute the normalised synthetic spectrum -- see
+    // MultiDatasetCost::synth_of_dataset for why a multi-component model is
+    // built from calibrated fluxes and summed continua rather than averaged.
+    const bool composite = model_.grids.size() > 1;
+
     Vector model = Vector::Zero(n_points);
-    double weight_sum = 0.0;
-    
-    for (size_t c = 0; c < model_.grids.size(); ++c) {
-        Spectrum synth = compute_synthetic(
-            model_.grids[c], stellar[c], ds.obs.lambda,
-            ds.resOffset, ds.resSlope);
-        
-        double weight = std::pow(stellar[c].teff, 4);
-        model += weight * synth.flux;
-        weight_sum += weight;
+
+    if (!composite) {
+        model = compute_synthetic(model_.grids[0], stellar[0], ds.obs.lambda,
+                                  ds.resOffset, ds.resSlope).flux;
+    } else {
+        Vector num = Vector::Zero(n_points);
+        Vector den = Vector::Zero(n_points);
+        for (size_t c = 0; c < model_.grids.size(); ++c) {
+            Spectrum synth = compute_synthetic(
+                model_.grids[c], stellar[c], ds.obs.lambda,
+                ds.resOffset, ds.resSlope, /*with_continuum=*/true);
+            num += stellar[c].sur_ratio * synth.flux;
+            den += stellar[c].sur_ratio * synth.cont;
+        }
+        for (int i = 0; i < n_points; ++i)
+            model[i] = (den[i] > 0.0) ? num[i] / den[i] : 0.0;
     }
-    
-    if (weight_sum > 0) {
-        model /= weight_sum;
-    }
-    
+
     // Apply continuum
     return model.cwiseProduct(continuum);
 }

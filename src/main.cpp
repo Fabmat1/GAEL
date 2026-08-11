@@ -1,6 +1,7 @@
 #include "specfit/CommonTypes.hpp"
 #include "specfit/GaelAPI.hpp"
 #include "specfit/JsonUtils.hpp"
+#include "specfit/ParameterIndexer.hpp"
 #include "specfit/SpectrumCache.hpp"
 #include "specfit/SyntheticModel.hpp"
 #include "specfit/UnifiedFitWorkflow.hpp"
@@ -34,7 +35,10 @@ void write_fit_parameters_csv(const std::string    &out_dir,
                               const api::FitResult &result) {
     using PMember =
         std::vector<api::StellarParamResult> api::ComponentResult::*;
-    static const std::array<std::pair<const char *, PMember>, 8> tags = {{
+    /*  Order and count must match ParameterIndexer: the continuum anchors
+     *  below are indexed by continuing the same running counter.            */
+    static const std::array<std::pair<const char *, PMember>,
+                            ParameterIndexer::kNStellarParams> tags = {{
         {"vrad", &api::ComponentResult::vrad},
         {"vsini", &api::ComponentResult::vsini},
         {"zeta", &api::ComponentResult::zeta},
@@ -43,6 +47,7 @@ void write_fit_parameters_csv(const std::string    &out_dir,
         {"xi", &api::ComponentResult::xi},
         {"z", &api::ComponentResult::z},
         {"he", &api::ComponentResult::he},
+        {"sur_ratio", &api::ComponentResult::sur_ratio},
     }};
 
     fs::create_directories(out_dir);
