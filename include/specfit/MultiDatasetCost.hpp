@@ -3,6 +3,7 @@
 #include "ModelGrid.hpp"
 #include "SyntheticModel.hpp"
 #include "Spectrum.hpp"
+#include "TelluricGrid.hpp"
 #include "ParameterIndexer.hpp"
 #include <Eigen/Core>
 #include <vector>
@@ -22,6 +23,13 @@ struct DatasetInfo {
     int           cont_param_offset;   // where in the big parameter vector
     int           cont_param_count;
     std::vector<int>  ignoreflag;     // NEW
+
+    /*  Telluric transmission fitted on this spectrum.  `telluric_param_offset`
+     *  is an *absolute* index into the global parameter vector (unlike the
+     *  continuum offset, which is relative to the continuum block) and is
+     *  meaningful only when the grid is set.                                */
+    const TelluricGrid* telluric = nullptr;
+    int           telluric_param_offset = -1;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -29,16 +37,13 @@ struct DatasetInfo {
 /* ------------------------------------------------------------------------- */
 class MultiDatasetCost {
 public:
-    /* kept for legacy bounds; tracks the indexer so it cannot drift */
-    static constexpr int kStellarParamsPerComp =
-        ParameterIndexer::kNStellarParams;
-
     MultiDatasetCost(const std::vector<DatasetInfo>& datasets,
                      const std::vector<ModelGrid*>&  grids,
                      int  n_components,
                      const ParameterIndexer&         indexer,
                      int  total_residuals,
-                     int  total_cont_params);       
+                     int  total_cont_params,
+                     int  total_telluric_params = 0);
 
     /* number of residuals produced */
     int numResiduals() const { return num_residuals_; }
@@ -71,8 +76,16 @@ private:
      *  spectrum on the stellar parameters alone.                            */
     Vector continuum_of_dataset(const Eigen::VectorXd& p, std::size_t d) const;
     Vector synth_of_dataset    (const Eigen::VectorXd& p, std::size_t d) const;
+
+    /*  Telluric transmission of one spectrum, or an empty vector when this
+     *  spectrum does not fit one -- an empty vector means "no factor" rather
+     *  than a vector of ones, so a fit without tellurics does no extra work
+     *  and produces bit-identical residuals.                                */
+    Vector telluric_of_dataset (const Eigen::VectorXd& p, std::size_t d) const;
+
     void   rows_of_dataset(std::size_t d,
                            const Vector& synth, const Vector& continuum,
+                           const Vector& telluric,
                            Eigen::VectorXd& r) const;
 
     /* data */
@@ -80,7 +93,8 @@ private:
     std::vector<ModelGrid*>  grids_;
     int                      n_components_;
     int                      n_total_params_;
-    int                      base_cont_offset_;
+    int                      base_cont_offset_;   // start of the continuum block
+    int                      base_tell_offset_;   // start of the telluric block
     int                      num_residuals_;
     std::vector<int>         row_offset_;   // first residual row per spectrum
     std::vector<int>         row_count_;    // residual rows per spectrum

@@ -73,6 +73,7 @@ ModelGrid::ModelGrid(const std::vector<std::string>& bases,
         else if (col->repeat() == 1)        col->read(buf, 1, 1);   // scalar column
         else                                col->read(buf, 1);      // fixed-length vector
         axes_.push_back({name, to_eigen(buf)});
+        if (!is_stellar_axis(name)) species_.push_back(name);
     }
 }
 ModelGrid::ModelGrid(std::string abs) : base_(std::move(abs)) {}
@@ -88,6 +89,63 @@ static double param_for_axis(const std::string& n,
     throw std::runtime_error("Unsupported axis '"+n+"'.");
 }
 
+/* ------------------------------------------------------------------ *
+ *  Generic corner enumeration over an ordered list of (axis, value).
+ *
+ *  This used to be five hard-coded fields in a `struct Node`, which is why a
+ *  grid.fits carrying an element column crashed the loader.  A corner is now
+ *  just a coordinate vector, so the same routine serves the 5-axis HHE cube
+ *  and the 6-axis (5 stellar + abundance) cube of one element.
+ * ------------------------------------------------------------------ */
+namespace {
+
+struct CubeCorner {
+    std::vector<double> coord;   // one value per axis, in axis order
+    double              weight;
+};
+
+std::vector<CubeCorner>
+build_corners(const std::vector<const GridAxis*>& axes,
+              const std::vector<double>&          values)
+{
+    std::vector<CubeCorner> nodes;
+    nodes.push_back({std::vector<double>(axes.size(), 0.0), 1.0});
+
+    for (std::size_t a = 0; a < axes.size(); ++a) {
+        const Vector& grid = axes[a]->values;
+        const double  p    = values[a];
+
+        if (grid.size() == 1) {                    // pinned axis
+            for (auto& nd : nodes) nd.coord[a] = grid[0];
+            continue;
+        }
+
+        auto it = std::lower_bound(grid.data(), grid.data() + grid.size(), p);
+        int hi = (it == grid.data() + grid.size()) ? int(grid.size()) - 1
+                                                   : int(it - grid.data());
+        int lo = (hi == 0) ? 0 : hi - 1;
+
+        const double a_hi = (grid[hi] == grid[lo]) ? 0.0
+                          : (p - grid[lo]) / (grid[hi] - grid[lo]);
+        const double a_lo = 1.0 - a_hi;
+
+        const std::size_t n = nodes.size();
+        nodes.resize(n * 2);
+        for (std::size_t i = 0; i < n; ++i) {
+            nodes[n + i] = nodes[i];
+            nodes[i    ].coord[a] = grid[lo];  nodes[i    ].weight *= a_lo;
+            nodes[n + i].coord[a] = grid[hi];  nodes[n + i].weight *= a_hi;
+        }
+    }
+    return nodes;
+}
+
+/*  Guards the lazily-filled per-species wavelength grids of every ModelGrid;
+ *  a mutex member would make ModelGrid non-movable.                        */
+std::mutex g_lambda_mtx;
+
+} // namespace
+
 /* =================================================================== */
 Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                                   double he,double xi,double vsini,
@@ -100,6 +158,12 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
     std::array<Node,32> nodes{}; nodes[0] = {0,0,0,0,0,1}; int nN=1;
 
     for (const auto& ax: axes_) {
+        /*  Element axes are not dimensions of *this* cube: ISIS factorises
+         *  them out into one cube per element whose spectra multiply onto
+         *  this one (see load_element_factor).  Before this guard, a
+         *  grid.fits carrying an FE column threw out of param_for_axis.   */
+        if (!is_stellar_axis(ax.name)) continue;
+
         const double p = param_for_axis(ax.name,teff,logg,z,he,xi);
         const Vector& grid = ax.values;
 
@@ -275,6 +339,196 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
     return out;
 }
 
+/* =================================================================== *
+ *  Per-species wavelength grids
+ * =================================================================== */
+static Vector read_lambda_column(const std::string& path)
+{
+    CCfits::FITS f(path, CCfits::Read);
+    CCfits::ExtHDU& e = f.extension(1);
+    std::vector<Real> tmp;
+    e.column("l").read(tmp, 1, e.rows());
+    return Eigen::Map<Vector>(tmp.data(), tmp.size());
+}
+
+/*  Slice to the active window with one point of margin, matching what
+ *  read_fits() does to the flux arrays so the two stay index-aligned.     */
+Vector ModelGrid::slice_to_window(const Vector& lam) const
+{
+    if (lam.size() == 0) return lam;
+    if (window_lo_ == -std::numeric_limits<double>::infinity()) return lam;
+
+    const Real* b = lam.data();
+    const Real* e = lam.data() + lam.size();
+    Eigen::Index i0 = std::lower_bound(b, e, window_lo_) - b;
+    Eigen::Index i1 = std::upper_bound(b, e, window_hi_) - b;
+    if (i0 > 0)          --i0;
+    if (i1 < lam.size()) ++i1;
+    if (i1 <= i0) { i0 = 0; i1 = lam.size(); }
+    return lam.segment(i0, i1 - i0);
+}
+
+const Vector& ModelGrid::hhe_lambda() const
+{
+    std::lock_guard<std::mutex> lk(g_lambda_mtx);
+    if (hhe_lambda_.size() == 0)
+        hhe_lambda_ = slice_to_window(
+            read_lambda_column(base_ + "/HHE/lambda.fits"));
+    return hhe_lambda_;
+}
+
+const Vector& ModelGrid::species_lambda(int s) const
+{
+    std::lock_guard<std::mutex> lk(g_lambda_mtx);
+    if (species_lambda_.size() != species_.size())
+        species_lambda_.resize(species_.size());
+    if (s < 0 || s >= static_cast<int>(species_.size()))
+        throw std::runtime_error("species index out of range");
+    Vector& v = species_lambda_[static_cast<std::size_t>(s)];
+    if (v.size() == 0)
+        v = slice_to_window(read_lambda_column(
+                base_ + "/" + species_[static_cast<std::size_t>(s)] +
+                "/lambda.fits"));
+    return v;
+}
+
+/*  Guards union_lambda_; separate from g_lambda_mtx because building a union
+ *  calls species_lambda(), which takes that one.                            */
+static std::mutex g_union_mtx;
+
+const Vector& ModelGrid::union_lambda(const std::vector<int>& species) const
+{
+    {
+        std::lock_guard<std::mutex> lk(g_union_mtx);
+        for (const auto& [key, lam] : union_lambda_)
+            if (key == species) return lam;
+    }
+
+    /*  Built outside the lock: species_lambda() may read 25 FITS files the
+     *  first time round.                                                    */
+    std::vector<double> u(hhe_lambda().data(),
+                          hhe_lambda().data() + hhe_lambda().size());
+    for (int s : species) {
+        const Vector& l = species_lambda(s);
+        const std::size_t n0 = u.size();
+        u.insert(u.end(), l.data(), l.data() + l.size());
+        std::inplace_merge(u.begin(), u.begin() + n0, u.end());
+    }
+    u.erase(std::unique(u.begin(), u.end()), u.end());
+
+    std::lock_guard<std::mutex> lk(g_union_mtx);
+    for (const auto& [key, lam] : union_lambda_)
+        if (key == species) return lam;           // lost a race; keep the first
+    union_lambda_.emplace_back(
+        species, Eigen::Map<Vector>(u.data(), static_cast<Eigen::Index>(u.size())));
+    return union_lambda_.back().second;
+}
+
+/* =================================================================== *
+ *  One element's f_S/f_HHE line-correction spectrum
+ * =================================================================== */
+Vector ModelGrid::load_element_factor(int    s,
+                                      double teff, double logg, double z,
+                                      double he,   double xi,
+                                      double abundance) const
+{
+    if (s < 0 || s >= static_cast<int>(species_.size()))
+        throw std::runtime_error("species index out of range");
+    const std::string& name = species_[static_cast<std::size_t>(s)];
+
+    /* ---- the axes this cube spans: the five stellar ones, then the
+     *      element's own abundance axis (ISIS's interpol_syn appends "/%.3f"
+     *      to the path for exactly this reason).                          */
+    std::vector<const GridAxis*> axes;
+    std::vector<double>          vals;
+    const GridAxis* ax_z = nullptr; const GridAxis* ax_he = nullptr;
+    const GridAxis* ax_x = nullptr; const GridAxis* ax_g  = nullptr;
+    const GridAxis* ax_t = nullptr; const GridAxis* ax_a  = nullptr;
+
+    for (const auto& ax : axes_) {
+        if      (ax.name == "z")   ax_z  = &ax;
+        else if (ax.name == "HHE") ax_he = &ax;
+        else if (ax.name == "x")   ax_x  = &ax;
+        else if (ax.name == "g")   ax_g  = &ax;
+        else if (ax.name == "t")   ax_t  = &ax;
+        else if (ax.name == name)  ax_a  = &ax;
+    }
+    if (!ax_z || !ax_he || !ax_x || !ax_g || !ax_t || !ax_a)
+        throw std::runtime_error("grid '" + base_ + "' lacks an axis needed "
+                                 "for element '" + name + "'");
+
+    /*  Path order is fixed by the directory layout, so the axis order is
+     *  too: <S>/Z%.2f/HE%.3f/X%.2f/G%.3f/T%.0f/<A>.fits                    */
+    axes = { ax_z, ax_he, ax_x, ax_g, ax_t, ax_a };
+    vals = { z,    he,    xi,   logg, teff, abundance };
+
+    const auto nodes = build_corners(axes, vals);
+
+    Vector out; bool first = true; double wsum = 0.0;
+    for (const auto& nd : nodes) {
+        if (nd.weight == 0.0) continue;      // pinned axis: half the corners
+
+        std::ostringstream oss;
+        oss << base_ << '/' << name
+            << "/Z"  << fmt(nd.coord[0], 2)
+            << "/HE" << fmt(nd.coord[1], 3)
+            << "/X"  << fmt(nd.coord[2], 2)
+            << "/G"  << fmt(nd.coord[3], 3)
+            << "/T"  << int(std::lround(nd.coord[4]))
+            << '/'   << fmt(nd.coord[5], 3) << ".fits";
+
+        std::size_t key = std::hash<std::string>{}(oss.str());
+        key = hash_combine(key, 0xE1E3E27ULL);
+        key = hash_combine(key, window_key_);
+
+        SpectrumPtr sp = SpectrumCache::instance().insert_if_absent(key, [&] {
+            return read_element_fits(oss.str(), s);
+        });
+
+        if (first) { out = Vector::Zero(sp->flux.size()); first = false; }
+        out += sp->flux * nd.weight;
+        wsum     += nd.weight;
+    }
+    if (wsum > 0.0) out.array() /= wsum;
+    return out;
+}
+
+/*  An element file holds a single column "f": the ratio flux, already on the
+ *  species' own wavelength grid.
+ *
+ *  Only `flux` is filled.  The wavelength grid is `species_lambda(s)` for
+ *  every corner of every element, so storing a copy of it -- plus a vector of
+ *  ones for `sigma` -- in each cache entry tripled what a corner costs for
+ *  nothing: 25 species is ~1 M points, and at eight live corners each that is
+ *  600 MB of duplicate lambda and unit sigma against a 128 MiB budget.      */
+Spectrum ModelGrid::read_element_fits(const std::string& path, int s) const
+{
+    const Vector& lam = species_lambda(s);
+
+    CCfits::FITS f(path, CCfits::Read);
+    CCfits::ExtHDU& ext = f.extension(1);
+    std::vector<Real> fl;
+    ext.column("f").read(fl, 1, ext.rows());
+
+    /*  The window slice applied to lambda has to be applied identically
+     *  here; species_lambda() sliced with the same bounds, so recover the
+     *  offset by locating the sliced grid inside the full one.            */
+    Eigen::Index i0 = 0;
+    if (static_cast<Eigen::Index>(fl.size()) != lam.size()) {
+        const Vector full = read_lambda_column(
+            base_ + "/" + species_[static_cast<std::size_t>(s)] + "/lambda.fits");
+        const Real* b = full.data();
+        i0 = std::lower_bound(b, b + full.size(), lam[0]) - b;
+        if (i0 + lam.size() > static_cast<Eigen::Index>(fl.size()))
+            throw std::runtime_error("element file '" + path +
+                                     "' does not match its lambda grid");
+    }
+
+    Spectrum sp;
+    sp.flux = Eigen::Map<Vector>(fl.data(), fl.size()).segment(i0, lam.size());
+    return sp;
+}
+
 /* ------------------------------------------------------------------ */
 void ModelGrid::set_wavelength_window(double lambda_min, double lambda_max)
 {
@@ -391,6 +645,27 @@ ModelGrid::ParameterBounds ModelGrid::get_parameter_bounds() const {
     }
     
     return bounds;
+}
+
+ModelGrid::ParameterBounds
+ModelGrid::intersect(const std::vector<ParameterBounds>& all)
+{
+    ParameterBounds out;
+    bool first = true;
+    for (const auto& b : all) {
+        if (first) { out = b; first = false; continue; }
+        out.teff_min = std::max(out.teff_min, b.teff_min);
+        out.teff_max = std::min(out.teff_max, b.teff_max);
+        out.logg_min = std::max(out.logg_min, b.logg_min);
+        out.logg_max = std::min(out.logg_max, b.logg_max);
+        out.z_min    = std::max(out.z_min,    b.z_min);
+        out.z_max    = std::min(out.z_max,    b.z_max);
+        out.he_min   = std::max(out.he_min,   b.he_min);
+        out.he_max   = std::min(out.he_max,   b.he_max);
+        out.xi_min   = std::max(out.xi_min,   b.xi_min);
+        out.xi_max   = std::min(out.xi_max,   b.xi_max);
+    }
+    return out;
 }
 
 } // namespace specfit

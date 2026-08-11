@@ -57,6 +57,43 @@ FitInput::FitInput(FitInput&&) noexcept                                   = defa
 FitInput& FitInput::operator=(const FitInput&)                            = default;
 FitInput& FitInput::operator=(FitInput&&) noexcept                        = default;
 
+std::vector<StellarParamResult>* ComponentResult::find(const std::string& name)
+{
+    /*  Const-correct twin below; one lookup table, written once.  Element
+     *  abundances have no dedicated member and land here as nullptr until the
+     *  abundance work adds their container.                                  */
+    if (name == "vrad")      return &vrad;
+    if (name == "vsini")     return &vsini;
+    if (name == "zeta")      return &zeta;
+    if (name == "teff")      return &teff;
+    if (name == "logg")      return &logg;
+    if (name == "xi")        return &xi;
+    if (name == "z")         return &z;
+    if (name == "he")        return &he;
+    if (name == "sur_ratio") return &sur_ratio;
+    /*  Anything else is an element name coming from the grid. */
+    return &abundances[name];
+}
+
+const std::vector<StellarParamResult>*
+ComponentResult::find(const std::string& name) const
+{
+    /*  Deliberately not the const_cast twin: the mutable overload *creates*
+     *  an element's entry on first touch, which is how the results get
+     *  populated, and a lookup must not have that side effect.             */
+    if (name == "vrad")      return &vrad;
+    if (name == "vsini")     return &vsini;
+    if (name == "zeta")      return &zeta;
+    if (name == "teff")      return &teff;
+    if (name == "logg")      return &logg;
+    if (name == "xi")        return &xi;
+    if (name == "z")         return &z;
+    if (name == "he")        return &he;
+    if (name == "sur_ratio") return &sur_ratio;
+    auto it = abundances.find(name);
+    return (it == abundances.end()) ? nullptr : &it->second;
+}
+
 ComponentResult::ComponentResult()                                        = default;
 ComponentResult::~ComponentResult()                                       = default;
 ComponentResult::ComponentResult(const ComponentResult&)                  = default;
@@ -279,6 +316,12 @@ bool preprocess_one(const SpectrumFileInput& f,
     out.resOffset = f.resOffset;
     out.resSlope  = f.resSlope;
     out.keep      = std::move(flags);
+
+    /*  ISIS seeds the telluric shift from the observation's barycentric
+     *  correction and leaves it free; airmass 0 switches the component off. */
+    out.telluric_enabled = gs.add_telluric_model && f.fit_telluric &&
+                           f.airmass >= 1e-5;
+    out.telluric = { f.airmass, f.pwv, f.barycorr };
     return true;
 }
 
@@ -374,6 +417,30 @@ FitResult GaelSession::run()
         frozen[c]["z"]    =ci.freeze_z;      frozen[c]["he"]   =ci.freeze_he;
         frozen[c]["sur_ratio"] =
             (c == 0 || comps.size() == 1) ? true : ci.freeze_sur_ratio;
+
+        /* ---- element abundances ------------------------------------- *
+         *  Every species the grid resolves gets a value, because leaving one
+         *  out would drop its lines from the model; only the ones the config
+         *  names are unfrozen.  The default is the middle of the element's
+         *  own grid axis, which is what ISIS's stellar_default uses.      */
+        const auto& species = model.grids[c].species();
+        sp.abundances.assign(species.size(), 0.0);
+        for (std::size_t s = 0; s < species.size(); ++s) {
+            const std::string& name = species[s];
+            const GridAxis*    ax   = model.grids[c].axis(name);
+
+            double mid = 0.0;
+            if (ax && ax->values.size() > 0)
+                mid = 0.5 * (ax->values[0] + ax->values[ax->values.size() - 1]);
+
+            auto itv = ci.abundances.find(name);
+            sp.abundances[s] = (itv != ci.abundances.end()) ? itv->second : mid;
+
+            auto itf = ci.freeze_abundances.find(name);
+            frozen[c][name] = (itf != ci.freeze_abundances.end())
+                            ? itf->second
+                            : true;   // opt-in: unnamed elements are not fitted
+        }
     }
 
     // ---- preprocess every file ---------------------------------------------
@@ -396,6 +463,15 @@ FitResult GaelSession::run()
     }
     if (datasets.empty())
         throw std::runtime_error("No spectra passed the quality filters");
+
+    /* ---- telluric library, shared by every spectrum that fits one ------ */
+    if (std::any_of(datasets.begin(), datasets.end(),
+                    [](const DataSet& d){ return d.telluric_enabled; })) {
+        model.telluric = std::make_shared<::specfit::TelluricGrid>(
+            ::specfit::TelluricGrid::resolve(gs.base_paths));
+        model.telluric->set_isis_pwv_scale(gs.telluric_isis_pwv_scale);
+        log("telluric model enabled (" + model.telluric->directory() + ")");
+    }
 
     /* ---- restrict the model grids to the wavelengths that are fitted -----
      *  Union over all datasets, widened by the largest Doppler shift the
@@ -464,24 +540,24 @@ FitResult GaelSession::run()
                != gs.untie_params.end();
     };
 
-    // same parameter ordering as ParameterIndexer
-    // (vrad, vsini, zeta, teff, logg, xi, z, he, sur_ratio)
-    constexpr int NP = ::specfit::ParameterIndexer::kNStellarParams;
-    const char* pnames[NP] = { "vrad","vsini","zeta","teff","logg","xi","z","he",
-                               "sur_ratio" };
-
+    /*  Which parameters a component has comes from its grid, so the walk is
+     *  driven by the indexer's table rather than a hard-coded list.  The
+     *  order is the order of the global parameter vector.                   */
     R.components.assign(n_comp, {});
     for (int c = 0; c < n_comp; ++c) {
-        auto& cr = R.components[c];
-        std::array<std::vector<StellarParamResult>*, NP> slots = {
-            &cr.vrad, &cr.vsini, &cr.zeta, &cr.teff,
-            &cr.logg, &cr.xi,    &cr.z,    &cr.he, &cr.sur_ratio
-        };
-        for (int p = 0; p < NP; ++p) {
-            const int reps = is_untied(pnames[p]) ? n_ds : 1;
+        auto&       cr    = R.components[c];
+        const auto& table = idx.params(c);
+        for (std::size_t p = 0; p < table.size(); ++p) {
+            const auto& ps = table[p];
+            cr.param_order.push_back(ps.name);
+
+            auto* slot = cr.find(ps.name);
+            if (!slot) continue;          // no container for it (yet)
+
+            const int reps = is_untied(ps.name) ? n_ds : 1;
             for (int d = 0; d < reps; ++d) {
-                const int gidx = idx.get(c, d, p);
-                push_param(*slots[p], R.raw_params, R.raw_uncertainties,
+                const int gidx = idx.get(c, d, static_cast<int>(p));
+                push_param(*slot, R.raw_params, R.raw_uncertainties,
                            R.raw_free_mask, gidx);
             }
         }
@@ -514,6 +590,19 @@ FitResult GaelSession::run()
         S.cont_y    = cy;                     // materialises a copy
         cs += (int)ds.cont_y.size();
 
+        if (ds.telluric_enabled && model.telluric) {
+            const int tb = wf.telluric_offset_of(d);
+            if (tb >= 0) {
+                for (int k = 0; k < ::specfit::kNTelluricParams; ++k)
+                    push_param(S.telluric_params, R.raw_params,
+                               R.raw_uncertainties, R.raw_free_mask, tb + k);
+                S.telluric = model.telluric->transmission(
+                    ds.obs.lambda,
+                    R.raw_params[tb + 0], R.raw_params[tb + 1],
+                    R.raw_params[tb + 2], ds.resOffset, ds.resSlope);
+            }
+        }
+
         ndata += std::count(ds.obs.ignoreflag.begin(),
                             ds.obs.ignoreflag.end(), 1);
         R.spectra.push_back(std::move(S));
@@ -526,30 +615,30 @@ FitResult GaelSession::run()
     // does a short continuum+stellar solve (no progressive stages, no
     // iterative-noise rejection, no Powell). Far cheaper than a full re-fit.
     if (gs.cont_jitter_K > 0 && !R.components.empty()) {
-        using Slot = std::vector<StellarParamResult> ComponentResult::*;
-        const std::array<Slot,NP> slots = {
-            &ComponentResult::vrad, &ComponentResult::vsini,
-            &ComponentResult::zeta, &ComponentResult::teff,
-            &ComponentResult::logg, &ComponentResult::xi,
-            &ComponentResult::z,    &ComponentResult::he,
-            &ComponentResult::sur_ratio };
-
-        std::vector<std::array<std::vector<std::vector<double>>,NP>>
+        /*  acc[c][p][d] collects one component's parameter p over the
+         *  ensemble, per dataset for the untied ones.  Sized from the
+         *  indexer's table, so a grid with element axes needs no change.   */
+        std::vector<std::vector<std::vector<std::vector<double>>>>
             acc(R.components.size());
-        for (std::size_t c = 0; c < R.components.size(); ++c)
-            for (int p = 0; p < NP; ++p)
-                acc[c][p].resize((R.components[c].*slots[p]).size());
+        for (int c = 0; c < n_comp; ++c) {
+            const auto& table = idx.params(c);
+            acc[static_cast<std::size_t>(c)].resize(table.size());
+            for (std::size_t p = 0; p < table.size(); ++p) {
+                const auto* vec = R.components[c].find(table[p].name);
+                acc[static_cast<std::size_t>(c)][p].resize(vec ? vec->size() : 0);
+            }
+        }
 
         const std::vector<StellarParams> warm = model.params;  // converged fit
-        const char* const* pn = pnames;
 
         // Freeze in the ensemble exactly what the main fit ended frozen on
         // (e.g. vsini auto-frozen in stage 5), so the refits match the solution.
         std::vector<std::map<std::string,bool>> frozen_ens = frozen;
-        for (std::size_t c = 0; c < R.components.size() && c < frozen_ens.size(); ++c)
-            for (int p = 0; p < NP; ++p) {
-                const auto& vec = (R.components[c].*slots[p]);
-                if (!vec.empty()) frozen_ens[c][pn[p]] = vec[0].frozen;
+        for (int c = 0; c < n_comp && (std::size_t)c < frozen_ens.size(); ++c)
+            for (const auto& ps : idx.params(c)) {
+                const auto* vec = R.components[c].find(ps.name);
+                if (vec && !vec->empty())
+                    frozen_ens[c][ps.name] = (*vec)[0].frozen;
             }
 
         std::mt19937 rng(20260604u);   // fixed seed: reproducible errors
@@ -575,31 +664,39 @@ FitResult GaelSession::run()
                 jwf.quick_refit();
                 const auto p = jwf.get_parameters();
                 const auto& ji = jwf.get_indexer();
-                auto is_untied = [&](const char* n){
-                    return std::find(gs.untie_params.begin(), gs.untie_params.end(),
-                                     std::string(n)) != gs.untie_params.end(); };
-                for (std::size_t c = 0; c < acc.size(); ++c)
-                    for (int pp = 0; pp < NP; ++pp) {
-                        const int reps = is_untied(pn[pp]) ? (int)datasets.size() : 1;
-                        for (int d = 0; d < reps && (std::size_t)d < acc[c][pp].size(); ++d)
-                            acc[c][pp][d].push_back(p[ji.get((int)c,d,pp)]);
+                for (int c = 0; c < n_comp; ++c) {
+                    const auto& table = ji.params(c);
+                    for (std::size_t pp = 0; pp < table.size(); ++pp) {
+                        auto& bucket = acc[static_cast<std::size_t>(c)][pp];
+                        const int reps = is_untied(table[pp].name)
+                                         ? (int)datasets.size() : 1;
+                        for (int d = 0; d < reps && (std::size_t)d < bucket.size(); ++d)
+                            bucket[d].push_back(
+                                p[ji.get(c, d, static_cast<int>(pp))]);
                     }
+                }
             }
         } catch (...) { std::cout.rdbuf(old); throw; }
         std::cout.rdbuf(old);
 
         // fold the ensemble scatter into the reported errors (quadrature)
-        for (std::size_t c = 0; c < R.components.size(); ++c)
-            for (int p = 0; p < NP; ++p)
-                for (std::size_t d = 0; d < acc[c][p].size(); ++d) {
-                    const auto& v = acc[c][p][d];
+        for (int c = 0; c < n_comp; ++c) {
+            const auto& table = idx.params(c);
+            for (std::size_t p = 0; p < table.size(); ++p) {
+                auto* out = R.components[c].find(table[p].name);
+                if (!out) continue;
+                for (std::size_t d = 0; d < acc[static_cast<std::size_t>(c)][p].size();
+                     ++d) {
+                    const auto& v = acc[static_cast<std::size_t>(c)][p][d];
                     if (v.size() < 2) continue;
                     double m = 0.0; for (double x : v) m += x; m /= v.size();
                     double s = 0.0; for (double x : v) s += (x-m)*(x-m);
                     s = std::sqrt(s / v.size());
-                    auto& pr = (R.components[c].*slots[p])[d];
+                    auto& pr = (*out)[d];
                     pr.error = std::sqrt(pr.error*pr.error + s*s);
                 }
+            }
+        }
         R.cont_jitter_K = gs.cont_jitter_K;
     }
 

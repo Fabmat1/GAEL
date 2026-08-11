@@ -116,6 +116,47 @@
      "min_n": 60
     }
    }
+  },
+  "xshooter_metal": {
+   "min_clean_cases": 8,
+   "parameters": {
+    "c1_FE": {
+     "max_abs_bias": 0.0053,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 0.021,
+     "min_n": 7
+    },
+    "c1_SI": {
+     "max_abs_bias": 0.005,
+     "max_outlier_fraction": 0.197,
+     "max_scatter": 0.01,
+     "min_n": 7
+    },
+    "c1_he": {
+     "max_abs_bias": 0.005,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 0.01,
+     "min_n": 7
+    },
+    "c1_logg": {
+     "max_abs_bias": 0.005,
+     "max_outlier_fraction": 0.197,
+     "max_scatter": 0.01,
+     "min_n": 7
+    },
+    "c1_teff": {
+     "max_abs_bias": 25.0,
+     "max_outlier_fraction": 0.05,
+     "max_scatter": 50.0,
+     "min_n": 7
+    },
+    "c1_vrad": {
+     "max_abs_bias": 0.3,
+     "max_outlier_fraction": 0.113,
+     "max_scatter": 0.5,
+     "min_n": 14
+    }
+   }
   }
  }
 }

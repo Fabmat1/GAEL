@@ -80,4 +80,29 @@ Vector rotational_broaden_nocache(const Vector& lam,
                                   double epsilon = 0.6,
                                   int n_kernel = 81);
 
+/**
+ * Rotational broadening reported on a separate output grid.
+ *
+ * Same integral over the full `lam_in`, evaluated only at `lam_out`.  Used by
+ * the metal path, where the input is the 600 k-point union of the species
+ * grids: at that size the single-grid routine spends most of a fit building
+ * weights (81 binary searches and a sort per input point, ~1.2 GB per vsini,
+ * and vsini moves on every Levenberg-Marquardt column).
+ *
+ * The weights are also stored differently -- one contiguous run of input
+ * indices per output point, in one flat array, instead of a std::vector of
+ * (index, weight) pairs per point -- and are built with a monotone cursor
+ * over the kernel taps rather than a binary search each.  Those are the
+ * reason this overload is a separate routine and not a generalisation of the
+ * one above: consolidating duplicate taps by accumulation rather than by
+ * sort-then-merge reorders the floating-point sum, and the metal-free path
+ * is required to stay bit-for-bit unchanged.
+ */
+Vector rotational_broaden(const Vector& lam_in,
+                          const Vector& flux,
+                          const Vector& lam_out,
+                          double vsini_kms,
+                          double epsilon = 0.6,
+                          int n_kernel = 81);
+
 } // namespace specfit

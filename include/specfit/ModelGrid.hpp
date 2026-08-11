@@ -1,9 +1,13 @@
 #pragma once
 #include "Spectrum.hpp"
 #include "Types.hpp"
+#include "ParameterSpec.hpp"
 #include <cstddef>
 #include <limits>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace specfit {
@@ -38,6 +42,27 @@ public:
 
     const std::vector<GridAxis>& axes() const { return axes_; }
 
+    /*  Grid axis by name ("t", "g", "HHE", "FE", ...), or nullptr. */
+    const GridAxis* axis(const std::string& name) const
+    {
+        for (const auto& a : axes_) if (a.name == name) return &a;
+        return nullptr;
+    }
+
+    /*  Names of the element axes this grid resolves, in grid.fits column
+     *  order -- everything that is not one of the five stellar axes
+     *  (t, g, x, z, HHE / HE3 / HE4).  Empty for an HHE-only grid, which is
+     *  what every grid shipped so far is.  Each name is both the fit
+     *  parameter's name (ISIS: `cN_FE`) and the sub-directory the element's
+     *  ratio spectra live in.                                               */
+    const std::vector<std::string>& species() const { return species_; }
+
+    static bool is_stellar_axis(const std::string& name)
+    {
+        return name == "t" || name == "g" || name == "x" || name == "z" ||
+               name == "HHE" || name == "HE3" || name == "HE4";
+    }
+
     /* ------------------------------------------------------------------ *
      *  Restrict every corner spectrum to the wavelength range that the fit
      *  can actually see.
@@ -53,6 +78,44 @@ public:
      *  The window becomes part of every cache key, so a grid sliced for one
      *  fit can never serve a short spectrum to a later, wider one.
      * ------------------------------------------------------------------ */
+    /* ------------------------------------------------------------------ *
+     *  One element's line-correction spectrum: the ratio f_S/f_HHE that
+     *  ISIS's grids store per element (make_fit_grid.sl divides the metal
+     *  flux by the corresponding HHE flux and clips it to exactly 1 where it
+     *  lies within 0.999-1.001).  Multiplying these onto the HHE flux is how
+     *  ISIS builds a metal-bearing model without computing every combination
+     *  of abundances -- see Irrgang et al. 2014, A&A 565, A63.
+     *
+     *  Interpolated over the same five stellar axes as the HHE cube plus this
+     *  element's own abundance axis, and returned *unbroadened* on the
+     *  element's native wavelength grid: the product has to be formed before
+     *  the convolution, because f_HHE * f_S is not linear and so does not
+     *  commute with it the way the corner interpolation does.
+     * ------------------------------------------------------------------ */
+    Vector load_element_factor(int    species_index,
+                               double teff,
+                               double logg,
+                               double z,
+                               double he,
+                               double xi,
+                               double abundance) const;
+
+    /*  The wavelength grid one species is tabulated on (<S>/lambda.fits),
+     *  restricted to the active window.  Species grids differ a lot -- on the
+     *  Feros grids HHE has 14 822 points where NI has 135 834 -- which is why
+     *  ISIS interpolates everything onto their union before multiplying.    */
+    const Vector& species_lambda(int species_index) const;
+    const Vector& hhe_lambda() const;
+
+    /*  HHE's grid merged with those of the given species, memoised.
+     *
+     *  This is the grid the metal product has to be formed on, and it is the
+     *  same one for the whole fit: it depends only on which elements are
+     *  switched on, never on the parameter values.  Rebuilding it per model
+     *  evaluation -- 24 merges into a 600 k-point vector -- was pure repeat
+     *  work.                                                                */
+    const Vector& union_lambda(const std::vector<int>& species) const;
+
     void set_wavelength_window(double lambda_min, double lambda_max);
 
     /*  Hash of the active window; 0 when the whole grid is in use. */
@@ -105,19 +168,61 @@ public:
             }
             return at_boundary;
         }
+
+        /*  The grid's own limits on one parameter, or nullopt when the grid
+         *  says nothing about it (vrad, vsini, zeta, sur_ratio -- those are
+         *  fit policy, not grid facts, and live in UnifiedFitWorkflow).
+         *
+         *  Note the asymmetry for `xi`: an absent axis leaves teff/logg/z/he
+         *  at +-DBL_MAX and those are still handed to the solver, while xi
+         *  falls back to the caller's default instead.  That is the behaviour
+         *  the hard-coded version had; every grid shipped so far carries all
+         *  five axes, so the two have never differed in practice.           */
+        std::optional<std::pair<double,double>> for_kind(ParamKind k) const
+        {
+            switch (k) {
+                case ParamKind::Teff: return std::make_pair(teff_min, teff_max);
+                case ParamKind::Logg: return std::make_pair(logg_min, logg_max);
+                case ParamKind::Z:    return std::make_pair(z_min,    z_max);
+                case ParamKind::He:   return std::make_pair(he_min,   he_max);
+                case ParamKind::Xi:
+                    if (xi_min > -1e9) return std::make_pair(xi_min, xi_max);
+                    return std::nullopt;
+                default: return std::nullopt;
+            }
+        }
     };
-    
+
     ParameterBounds get_parameter_bounds() const;
+
+    /*  Most restrictive bounds over several grids -- a binary's components can
+     *  sit on grids with different coverage, and a parameter tied across them
+     *  has to stay inside both.                                             */
+    static ParameterBounds intersect(const std::vector<ParameterBounds>& b);
 
 private:
     std::string              base_;
     std::vector<GridAxis>    axes_;
+    std::vector<std::string> species_;
+
+    /*  Per-species wavelength grid, sliced to the active window; filled
+     *  lazily because reading 25 of them costs more than most fits need.
+     *  Guarded by a file-local mutex in ModelGrid.cpp -- a mutex *member*
+     *  would make ModelGrid non-movable, and SharedModel keeps its grids in
+     *  a std::vector.                                                      */
+    mutable std::vector<Vector> species_lambda_;
+    mutable Vector              hhe_lambda_;
+
+    /*  Memoised union grids, keyed by the active-species list. */
+    mutable std::vector<std::pair<std::vector<int>, Vector>> union_lambda_;
 
     double      window_lo_  = -std::numeric_limits<double>::infinity();
     double      window_hi_  =  std::numeric_limits<double>::infinity();
     std::size_t window_key_ = 0;
 
     Spectrum read_fits(const std::string& path, bool with_continuum) const;
+    Spectrum read_element_fits(const std::string& path, int species_index) const;
+    Vector   slice_to_window(const Vector& lam) const;
 };
 
 } // namespace specfit

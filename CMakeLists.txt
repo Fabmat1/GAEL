@@ -166,6 +166,7 @@ add_library(GAELcore
     src/RotationalConvolution.cpp
     src/ContinuumModel.cpp
     src/ModelGrid.cpp
+    src/TelluricGrid.cpp
     src/SyntheticModel.cpp
     src/FitParameters.cpp
     src/Observation.cpp
@@ -251,6 +252,12 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/global_settings.json
 
 add_executable(mock_data_generator src/mock_data_generator.cpp)
 target_link_libraries(mock_data_generator PRIVATE GAELcore cxxopts::cxxopts)
+
+# Recovery-test data for the features that have no ISIS reference: element
+# abundances and multi-component fits.  See tests/gen_mock_xshooter.cpp.
+add_executable(gen_mock_xshooter tests/gen_mock_xshooter.cpp)
+target_link_libraries(gen_mock_xshooter PRIVATE GAELcore cxxopts::cxxopts
+                      nlohmann_json::nlohmann_json)
 
 # ---------------------------------------------------------------------------
 # 8b. Tests (ctest)

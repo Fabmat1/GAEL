@@ -2,6 +2,7 @@
 #include "Types.hpp"
 #include <array>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -33,6 +34,17 @@ struct GlobalSettings {
     // stage behaviour
     bool   auto_freeze_vsini = true;
     std::vector<std::string> untie_params = {"vrad"};
+
+    /*  Fit the Earth's atmosphere as a multiplicative component, as ISIS's
+     *  `add_telluric_model` qualifier does.  Needs the ESO transmission
+     *  library under <basePath>/telluric/.  Off by default, and pointless
+     *  blueward of ~5700 A where there is nothing to model.                */
+    bool   add_telluric_model = false;
+
+    /*  Reproduce ISIS's factor-10 slip in the telluric PWV scaling; see
+     *  TelluricGrid::set_isis_pwv_scale.  Only for direct comparison with
+     *  ISIS -- it puts most of the pwv range outside the library.          */
+    bool   telluric_isis_pwv_scale = false;
 
     /*  Multi-component fits: ISIS's auto_freeze_sur_ratio, which drops a
      *  second grid whose initial surface ratio is already below threshold and
@@ -90,8 +102,23 @@ struct StellarComponentInit {
      *  one grid is given.                                                    */
     double sur_ratio = 1.0;
     bool   freeze_sur_ratio = false;
-    // Trivially destructible (only POD + std::string). Implicit special
-    // members are fine.
+
+    /*  Element abundances, keyed by the grid's own species name ("FE", "SI",
+     *  ...) and given as log10 of the fractional particle number, exactly as
+     *  ISIS's cN_<ELEMENT> parameters are.
+     *
+     *  Every element the grid resolves is *modelled* whether or not it
+     *  appears here -- leaving it out would drop its lines from the model
+     *  entirely -- but only the ones named here with freeze=false are
+     *  *fitted*.  Anything absent is frozen at the middle of its grid axis,
+     *  which is ISIS's stellar_default value.  (ISIS additionally leaves them
+     *  all free; with 24 elements per grid that is 24 extra Jacobian columns,
+     *  so GAEL makes fitting opt-in.)
+     *
+     *  An abundance of 10 or more switches the element off completely, which
+     *  is ISIS's convention for excluding one from the model.               */
+    std::map<std::string, double> abundances;
+    std::map<std::string, bool>   freeze_abundances;
 };
 
 struct SpectrumFileInput {
@@ -99,7 +126,21 @@ struct SpectrumFileInput {
     std::string spectype;                  // "ASCII_with_2_columns", ...
     double resOffset = 0.0;
     double resSlope  = 0.0;
+
+    /*  Barycentric correction in km/s.  The spectra GAEL is given are already
+     *  corrected, so this does not move the *data*; it seeds the telluric
+     *  component's own shift, because the telluric lines sit in the
+     *  observatory's frame and the correction moved them by exactly this
+     *  much.  ISIS seeds it the same way (spectroscopy_automated.sl ~716).  */
     double barycorr  = 0.0;
+
+    /*  Telluric seeds; ISIS's defaults are airmass 1, pwv 1 mm.  Only used
+     *  when settings.addTelluricModel is on.  Setting airmass to 0 switches
+     *  the component off for this spectrum, which is what ISIS does for a
+     *  spectrum whose tellurics have already been divided out.             */
+    double airmass   = 1.0;
+    double pwv       = 1.0;
+    bool   fit_telluric = true;
 
     std::optional<std::array<double,2>>                  waveCut;
     std::optional<std::vector<std::array<double,2>>>     ignore;
@@ -154,6 +195,22 @@ struct ComponentResult {
     std::vector<StellarParamResult> vrad, vsini, zeta, teff, logg, xi, z, he,
                                     sur_ratio;
 
+    /*  Element abundances keyed by the grid's species name ("FE", "SI", ...).
+     *  Present for every element the grid resolves, frozen ones included.  */
+    std::map<std::string, std::vector<StellarParamResult>> abundances;
+
+    /*  This component's parameter names in the order they occupy the global
+     *  parameter vector -- which is also the order raw_params /
+     *  raw_uncertainties / raw_free_mask are laid out in, so a consumer
+     *  walking those flat arrays can stay in step without knowing which
+     *  parameters the grid happened to provide.                             */
+    std::vector<std::string> param_order;
+
+    /*  Look a parameter up by the name that appears in `param_order`;
+     *  nullptr if this component has no such parameter.                     */
+    std::vector<StellarParamResult>*       find(const std::string& name);
+    const std::vector<StellarParamResult>* find(const std::string& name) const;
+
     ComponentResult();
     ~ComponentResult();
     ComponentResult(const ComponentResult&);
@@ -179,6 +236,12 @@ struct SpectrumResult {
     // continuum-spline anchors
     Vector cont_x;
     Vector cont_y;
+
+    /*  Fitted telluric transmission on the same lambda grid, empty when this
+     *  spectrum had no telluric component.  `model` already includes it.    */
+    Vector telluric;
+    // airmass, pwv, barycorr; empty unless the component was fitted
+    std::vector<StellarParamResult> telluric_params;
 
     SpectrumResult();
     ~SpectrumResult();

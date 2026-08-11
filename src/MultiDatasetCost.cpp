@@ -34,12 +34,15 @@ MultiDatasetCost::MultiDatasetCost(const std::vector<DatasetInfo>& datasets,
                                    int  n_components,
                                    const ParameterIndexer& indexer,
                                    int  /*total_residuals (unused)*/,
-                                   int  total_cont_params)
+                                   int  total_cont_params,
+                                   int  total_telluric_params)
     : datasets_(datasets)
     , grids_(grids)
     , n_components_(n_components)
-    , n_total_params_(indexer.total_stellar_params + total_cont_params)
-    , base_cont_offset_(indexer.total_stellar_params)
+    , n_total_params_(indexer.total_stellar_params + total_telluric_params +
+                      total_cont_params)
+    , base_cont_offset_(indexer.total_stellar_params + total_telluric_params)
+    , base_tell_offset_(indexer.total_stellar_params)
     , indexer_(indexer)
 {
     /* how many points are *actually* fitted? -------------------------- */
@@ -71,15 +74,15 @@ MultiDatasetCost::MultiDatasetCost(const std::vector<DatasetInfo>& datasets,
     }
 
     /* ----------  which spectra does each stellar parameter feed? ------- */
-    param_datasets_.assign(base_cont_offset_ > 0
-                               ? static_cast<std::size_t>(base_cont_offset_)
+    param_datasets_.assign(base_tell_offset_ > 0
+                               ? static_cast<std::size_t>(base_tell_offset_)
                                : 0,
                            {});
     for (int c = 0; c < n_components_; ++c)
         for (int d = 0; d < static_cast<int>(datasets_.size()); ++d)
-            for (int k = 0; k < ParameterIndexer::kNStellarParams; ++k) {
+            for (int k = 0; k < indexer_.n_params(c); ++k) {
                 const int j = indexer_.get(c, d, k);
-                if (j < 0 || j >= base_cont_offset_) continue;
+                if (j < 0 || j >= base_tell_offset_) continue;
                 auto& v = param_datasets_[static_cast<std::size_t>(j)];
                 if (std::find(v.begin(), v.end(), d) == v.end())
                     v.push_back(d);
@@ -133,17 +136,8 @@ Vector MultiDatasetCost::synth_of_dataset(const Eigen::VectorXd& p,
     Vector den = Vector::Zero(np);
 
     for (int c = 0; c < n_components_; ++c) {
-        StellarParams sp;
         const int di = static_cast<int>(d);
-        sp.vrad      = p[indexer_.get(c,di,0)];
-        sp.vsini     = p[indexer_.get(c,di,1)];
-        sp.zeta      = p[indexer_.get(c,di,2)];
-        sp.teff      = p[indexer_.get(c,di,3)];
-        sp.logg      = p[indexer_.get(c,di,4)];
-        sp.xi        = p[indexer_.get(c,di,5)];
-        sp.z         = p[indexer_.get(c,di,6)];
-        sp.he        = p[indexer_.get(c,di,7)];
-        sp.sur_ratio = p[indexer_.get(c,di,8)];
+        const StellarParams sp = stellar_params_from(indexer_, p, c, di);
 
         SpectrumPtr s = compute_synthetic_cached(*grids_[c], sp,
                                                   ds.lambda,
@@ -162,13 +156,37 @@ Vector MultiDatasetCost::synth_of_dataset(const Eigen::VectorXd& p,
     return synth;
 }
 
+/* ------------------------------------------------------------------ *
+ *  Telluric transmission of one spectrum.
+ *
+ *  ISIS models an unnormalised spectrum as `cspline * stellar * telluric`
+ *  (initialize_telluric.sl), i.e. the atmosphere is one more multiplicative
+ *  factor on the data bins.  An empty result means this spectrum has no
+ *  telluric component at all.
+ * ------------------------------------------------------------------ */
+Vector MultiDatasetCost::telluric_of_dataset(const Eigen::VectorXd& p,
+                                             std::size_t            d) const
+{
+    const auto& ds = datasets_[d];
+    if (!ds.telluric || ds.telluric_param_offset < 0) return Vector();
+
+    const int o = ds.telluric_param_offset;
+    return ds.telluric->transmission(ds.lambda,
+                                     p[o + static_cast<int>(TelluricParam::Airmass)],
+                                     p[o + static_cast<int>(TelluricParam::Pwv)],
+                                     p[o + static_cast<int>(TelluricParam::Barycorr)],
+                                     ds.resOffset, ds.resSlope);
+}
+
 void MultiDatasetCost::rows_of_dataset(std::size_t      d,
                                        const Vector&    synth,
                                        const Vector&    continuum,
+                                       const Vector&    telluric,
                                        Eigen::VectorXd& r) const
 {
     const auto& ds = datasets_[d];
     const int   np = static_cast<int>(ds.lambda.size());
+    const bool  has_tell = telluric.size() == ds.lambda.size();
 
     int row = row_offset_[d];
     for (int i = 0; i < np; ++i) {
@@ -177,8 +195,9 @@ void MultiDatasetCost::rows_of_dataset(std::size_t      d,
         const double sigma = ds.sigma[i];
         if (!std::isfinite(sigma) || sigma <= 0.0) continue;
 
-        const double model = synth[i] * continuum[i];
-        r[row++]           = (model - ds.flux[i]) / sigma;
+        double model = synth[i] * continuum[i];
+        if (has_tell) model *= telluric[i];
+        r[row++]     = (model - ds.flux[i]) / sigma;
     }
 }
 
@@ -195,7 +214,8 @@ void MultiDatasetCost::compute_residuals(const Eigen::VectorXd& p,
 
     for (std::size_t d = 0; d < datasets_.size(); ++d)
         rows_of_dataset(d, synth_of_dataset(p, d),
-                           continuum_of_dataset(p, d), r);
+                           continuum_of_dataset(p, d),
+                           telluric_of_dataset(p, d), r);
 }
 
 /* --------------------------------------------------------------------- */
@@ -229,15 +249,17 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
     ---------------------------------------------------------------- */
     std::vector<Vector> all_cont (nds);
     std::vector<Vector> all_synth(nds);
+    std::vector<Vector> all_tell (nds);
     for (std::size_t d = 0; d < nds; ++d) {
         all_cont [d] = continuum_of_dataset(parameters, d);
         all_synth[d] = synth_of_dataset    (parameters, d);
+        all_tell [d] = telluric_of_dataset (parameters, d);
     }
 
     const double eps_base = 1e-6;
     Eigen::VectorXd r0 = Eigen::VectorXd::Zero(num_residuals_);
     for (std::size_t d = 0; d < nds; ++d)
-        rows_of_dataset(d, all_synth[d], all_cont[d], r0);
+        rows_of_dataset(d, all_synth[d], all_cont[d], all_tell[d], r0);
 
     /* ========== (A) continuum anchors ============================== *
      *  The Akima spline is not linear in its ordinates, so these columns
@@ -292,15 +314,51 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
             const Vector lam_win  = ds.lambda.segment(i0, i1 - i0);
             const Vector cont_eps = spline_continuum(ds.cont_x, cy_eps, lam_win);
 
+            const Vector& tell     = all_tell[ds_idx];
+            const bool    has_tell = tell.size() == ds.lambda.size();
+
             for (Eigen::Index i = i0; i < i1; ++i) {
                 const int row = pix_row[static_cast<std::size_t>(i)];
                 if (row < 0) continue;       // pixel not fitted
 
-                const double dmodel =
-                    synth[i] * (cont_eps[i - i0] - continuum[i]);
+                double dmodel = synth[i] * (cont_eps[i - i0] - continuum[i]);
+                if (has_tell) dmodel *= tell[i];
                 jacobians->coeffRef(row, j_global) =
                     dmodel / (h * ds.sigma[i]);
             }
+        }
+    }
+
+    /* ========== (A2) telluric parameters =========================== *
+     *  Airmass, pwv and barycorr belong to one spectrum, so -- exactly like
+     *  that spectrum's continuum anchors -- their columns are zero everywhere
+     *  else and only that spectrum's rows have to be redone.  The synthetic
+     *  spectrum and the continuum are untouched by them, so neither is
+     *  recomputed.                                                          */
+    for (std::size_t d = 0; d < nds; ++d) {
+        const auto& ds = datasets_[d];
+        if (!ds.telluric || ds.telluric_param_offset < 0) continue;
+
+        const Eigen::Index o = row_offset_[d];
+        const Eigen::Index n = row_count_ [d];
+        if (n <= 0) continue;
+
+        Eigen::VectorXd p_eps;
+        Eigen::VectorXd r_eps;
+        for (int k = 0; k < kNTelluricParams; ++k) {
+            const int j = ds.telluric_param_offset + k;
+            if (!is_free(j)) continue;
+
+            const double h = eps_base * (std::abs(parameters[j]) + 1.0);
+            p_eps = parameters;
+            p_eps[j] += h;
+
+            r_eps = r0;
+            rows_of_dataset(d, all_synth[d], all_cont[d],
+                            telluric_of_dataset(p_eps, d), r_eps);
+
+            jacobians->col(j).segment(o, n) =
+                (r_eps.segment(o, n) - r0.segment(o, n)) / h;
         }
     }
 
@@ -313,7 +371,7 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
      *  on a five-spectrum fit.                                           */
     Eigen::VectorXd p_eps;
     Eigen::VectorXd r_eps;
-    for (int j = 0; j < base_cont_offset_; ++j)   // stellar parameters
+    for (int j = 0; j < base_tell_offset_; ++j)   // stellar parameters
     {
         if (!is_free(j)) continue;                // column is never read
 
@@ -329,6 +387,7 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
             rows_of_dataset(static_cast<std::size_t>(d),
                             synth_of_dataset(p_eps, static_cast<std::size_t>(d)),
                             all_cont[static_cast<std::size_t>(d)],
+                            all_tell[static_cast<std::size_t>(d)],
                             r_eps);
 
         for (int d : affected) {

@@ -1,7 +1,6 @@
 #include "specfit/CommonTypes.hpp"
 #include "specfit/GaelAPI.hpp"
 #include "specfit/JsonUtils.hpp"
-#include "specfit/ParameterIndexer.hpp"
 #include "specfit/SpectrumCache.hpp"
 #include "specfit/SyntheticModel.hpp"
 #include "specfit/UnifiedFitWorkflow.hpp"
@@ -33,23 +32,6 @@ namespace {
 /* ------------------------------------------------------------------ */
 void write_fit_parameters_csv(const std::string    &out_dir,
                               const api::FitResult &result) {
-    using PMember =
-        std::vector<api::StellarParamResult> api::ComponentResult::*;
-    /*  Order and count must match ParameterIndexer: the continuum anchors
-     *  below are indexed by continuing the same running counter.            */
-    static const std::array<std::pair<const char *, PMember>,
-                            ParameterIndexer::kNStellarParams> tags = {{
-        {"vrad", &api::ComponentResult::vrad},
-        {"vsini", &api::ComponentResult::vsini},
-        {"zeta", &api::ComponentResult::zeta},
-        {"teff", &api::ComponentResult::teff},
-        {"logg", &api::ComponentResult::logg},
-        {"xi", &api::ComponentResult::xi},
-        {"z", &api::ComponentResult::z},
-        {"he", &api::ComponentResult::he},
-        {"sur_ratio", &api::ComponentResult::sur_ratio},
-    }};
-
     fs::create_directories(out_dir);
     const std::string path = out_dir + "/fit_parameters.csv";
     std::ofstream     csv(path);
@@ -62,21 +44,38 @@ void write_fit_parameters_csv(const std::string    &out_dir,
     csv << "final_chi2," << std::setprecision(10) << result.final_chi2
         << ",0.0\n";
 
-    /* ---- stellar parameters (tied / untied) ----------------------- */
+    /* ---- stellar parameters (tied / untied) ----------------------- *
+     *  ComponentResult::param_order is the order these occupy the global
+     *  parameter vector, so walking it keeps `idx` -- which continues into
+     *  the continuum anchors below -- in step with raw_uncertainties.      */
     std::size_t idx = 0; // flat index into raw_uncertainties
     for (std::size_t c = 0; c < result.components.size(); ++c) {
         const auto &comp = result.components[c];
-        for (const auto &[tag, mem] : tags) {
-            const auto &vec    = comp.*mem;
-            const bool  untied = vec.size() > 1;
-            for (std::size_t d = 0; d < vec.size(); ++d, ++idx) {
+        for (const auto &tag : comp.param_order) {
+            const auto *vec = comp.find(tag);
+            if (!vec) continue;
+            const bool untied = vec->size() > 1;
+            for (std::size_t d = 0; d < vec->size(); ++d, ++idx) {
                 std::string name = "c" + std::to_string(c + 1) + "_" + tag;
                 if (untied)
                     name += "_d" + std::to_string(d + 1);
-                csv << name << ',' << std::setprecision(10) << vec[d].value
-                    << ',' << std::setprecision(10) << vec[d].error << '\n';
+                csv << name << ',' << std::setprecision(10) << (*vec)[d].value
+                    << ',' << std::setprecision(10) << (*vec)[d].error << '\n';
             }
         }
+    }
+
+    /* ---- telluric parameters --------------------------------------- *
+     *  These sit between the stellar block and the continuum anchors in the
+     *  global vector, so they have to be walked here to keep `idx` aligned
+     *  with raw_uncertainties.                                             */
+    for (const auto &sp : result.spectra) {
+        if (sp.telluric_params.empty()) continue;
+        const std::string stem = fs::path(sp.source_filename).stem().string();
+        for (std::size_t k = 0; k < sp.telluric_params.size(); ++k, ++idx)
+            csv << stem << "_" << specfit::telluric_param_name((int)k) << ','
+                << std::setprecision(10) << sp.telluric_params[k].value << ','
+                << std::setprecision(10) << sp.telluric_params[k].error << '\n';
     }
 
     /* ---- continuum anchor amplitudes (cont_y, with errors) -------- */

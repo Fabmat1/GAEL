@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <cassert>
+#include <cstdint>
 
 namespace specfit {
 
@@ -333,6 +334,268 @@ Vector rotational_broaden(const Vector& lam,
 
     // Apply weights
     return apply_weights(flux, *weights);
+}
+
+/* ===================================================================== *
+ *  Two-grid variant: integrate over `lam_in`, report on `lam_out`.
+ *
+ *  Storage is one contiguous run of input indices per output point, held in
+ *  a single flat array.  The kernel taps of one output point are monotone in
+ *  wavelength, so the indices they hit are monotone too: a cursor walks them
+ *  once, which removes both the per-tap binary search and the per-point sort
+ *  that dominate the single-grid routine on a 600 k-point grid.
+ * ===================================================================== */
+namespace {
+
+struct RotSegments {
+    std::vector<std::uint32_t> start;   // n_out : first input index of the run
+    std::vector<std::size_t>   off;     // n_out + 1 : offsets into w
+    std::vector<double>        w;       // flat weights
+
+    std::size_t bytes() const {
+        return start.capacity() * sizeof(std::uint32_t)
+             + off.capacity()   * sizeof(std::size_t)
+             + w.capacity()     * sizeof(double);
+    }
+};
+
+RotSegments compute_segments(const Vector& lam_in,
+                             const Vector& lam_out,
+                             double vsini_kms,
+                             double epsilon,
+                             int    n_kernel)
+{
+    const std::ptrdiff_t M = lam_in.size();
+    const std::ptrdiff_t N = lam_out.size();
+
+    if (n_kernel <= 0) n_kernel = 81;
+    if (n_kernel % 2 == 0) n_kernel++;
+
+    /*  Same profile as the single-grid routine: taps uniform in x = v/vsini
+     *  over [-1, 1], so they are ascending in wavelength.                   */
+    std::vector<double> vel_shift(n_kernel), vel_kernel(n_kernel);
+    for (int k = 0; k < n_kernel; ++k) {
+        const double x = -1.0 + 2.0 * k / (n_kernel - 1);
+        vel_shift[k]  = x * vsini_kms;
+        vel_kernel[k] = rot_profile(x, epsilon);
+    }
+    double ksum = 0.0;
+    for (double v : vel_kernel) ksum += v;
+    if (ksum > 0.0) for (double& v : vel_kernel) v /= ksum;
+
+    constexpr double c_km = 299792.458;
+    const double f_lo = 1.0 + vel_shift[0] / c_km;
+    const double f_hi = 1.0 + vel_shift[n_kernel - 1] / c_km;
+
+    const double*  li = lam_in.data();
+    const double*  lo = lam_out.data();
+    const double   lam_first = li[0];
+    const double   lam_last  = li[M - 1];
+
+    RotSegments S;
+    S.start.resize(static_cast<std::size_t>(N));
+    S.off.resize(static_cast<std::size_t>(N) + 1);
+
+    /*  lower_bound index, clamped exactly as the single-grid routine does
+     *  before it forms the two-point interpolation.                         */
+    auto lb = [&](double x) -> std::ptrdiff_t {
+        return std::lower_bound(li, li + M, x) - li;
+    };
+
+    /* ---- pass 1: the input-index run each output point touches --------- */
+    #pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < N; ++i) {
+        const double a = std::max(lo[i] * f_lo, lam_first);
+        const double b = std::min(lo[i] * f_hi, lam_last);
+
+        std::ptrdiff_t ja = lb(a); if (ja == 0) ja = 1; if (ja >= M) ja = M - 1;
+        std::ptrdiff_t jb = lb(b); if (jb == 0) jb = 1; if (jb >= M) jb = M - 1;
+        if (jb < ja) jb = ja;
+
+        S.start[static_cast<std::size_t>(i)] =
+            static_cast<std::uint32_t>(ja - 1);
+        S.off[static_cast<std::size_t>(i) + 1] =
+            static_cast<std::size_t>(jb - ja + 2);
+    }
+
+    /* ---- prefix sum -> flat offsets ------------------------------------ */
+    S.off[0] = 0;
+    for (std::ptrdiff_t i = 0; i < N; ++i)
+        S.off[static_cast<std::size_t>(i) + 1] +=
+            S.off[static_cast<std::size_t>(i)];
+    S.w.assign(S.off[static_cast<std::size_t>(N)], 0.0);
+
+    /*  Reciprocal input spacings.  Every one of the n_kernel taps of every
+     *  output point interpolates inside one input interval, so this turns
+     *  ~n_out * n_kernel divisions into that many multiplies for M extra.   */
+    std::vector<double> inv_dl(static_cast<std::size_t>(M), 0.0);
+    #pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t j = 1; j < M; ++j)
+        inv_dl[static_cast<std::size_t>(j)] = 1.0 / (li[j] - li[j - 1]);
+
+    /* ---- pass 2: accumulate the taps ----------------------------------- */
+    #pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < N; ++i) {
+        const std::size_t base = S.off[static_cast<std::size_t>(i)];
+        const std::ptrdiff_t s = S.start[static_cast<std::size_t>(i)];
+        double* wp = S.w.data() + base;
+
+        std::ptrdiff_t cur = s + 1;          // running lower_bound cursor
+        double sum = 0.0;
+
+        for (int k = 0; k < n_kernel; ++k) {
+            const double lam_k = lo[i] * (1.0 + vel_shift[k] / c_km);
+            if (lam_k < lam_first || lam_k > lam_last) continue;
+
+            while (cur < M && li[cur] < lam_k) ++cur;
+            std::ptrdiff_t j = cur;
+            if (j == 0) j = 1;
+            if (j >= M) j = M - 1;
+
+            const double t  = (lam_k - li[j - 1]) * inv_dl[static_cast<std::size_t>(j)];
+            const double w1 = vel_kernel[k] * (1.0 - t);
+            const double w2 = vel_kernel[k] * t;
+
+            if (w1 > 1e-12) { wp[j - 1 - s] += w1; sum += w1; }
+            if (w2 > 1e-12) { wp[j     - s] += w2; sum += w2; }
+        }
+
+        if (sum > 0.0) {
+            const double inv = 1.0 / sum;
+            const std::size_t len = S.off[static_cast<std::size_t>(i) + 1] - base;
+            for (std::size_t q = 0; q < len; ++q) wp[q] *= inv;
+        } else {
+            /*  Every tap fell outside the input grid.  Cannot happen while
+             *  lam_out lies inside lam_in, but keep the single-grid routine's
+             *  identity fallback rather than emitting a zero.               */
+            wp[0] = 1.0;
+        }
+    }
+
+    return S;
+}
+
+Vector apply_segments(const Vector& flux, const RotSegments& S)
+{
+    const std::ptrdiff_t N = static_cast<std::ptrdiff_t>(S.start.size());
+    Vector out(N);
+    const double* f = flux.data();
+
+    #pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < N; ++i) {
+        const std::size_t b   = S.off[static_cast<std::size_t>(i)];
+        const std::size_t e   = S.off[static_cast<std::size_t>(i) + 1];
+        const double*     fp  = f + S.start[static_cast<std::size_t>(i)];
+        const double*     wp  = S.w.data() + b;
+        double sum = 0.0;
+        #pragma omp simd reduction(+:sum)
+        for (std::size_t q = 0; q < e - b; ++q) sum += wp[q] * fp[q];
+        out[i] = sum;
+    }
+    return out;
+}
+
+/* ---- byte-budgeted LRU over (input grid, output grid, vsini, ...) ----- */
+/*  As in Resolution.cpp: the input grid here is the union of the species
+ *  grids, and two components of a binary can have unions that agree on their
+ *  range but not their interior, so an interior sample goes into the key.   */
+struct SegKey {
+    GridCacheKey in;
+    double       in_mid;
+    std::size_t  n_out;
+    double       out_start;
+    double       out_end;
+
+    bool operator==(const SegKey& o) const {
+        return in == o.in && n_out == o.n_out &&
+               std::abs(in_mid    - o.in_mid)    < 1e-10 &&
+               std::abs(out_start - o.out_start) < 1e-10 &&
+               std::abs(out_end   - o.out_end)   < 1e-10;
+    }
+};
+struct SegKeyHash {
+    std::size_t operator()(const SegKey& k) const {
+        return GridCacheKeyHash{}(k.in) ^ (std::hash<std::size_t>{}(k.n_out) << 1)
+             ^ (std::hash<double>{}(k.out_start) << 2)
+             ^ (std::hash<double>{}(k.out_end)   << 3)
+             ^ (std::hash<double>{}(k.in_mid)    << 4);
+    }
+};
+
+using SegPtr = std::shared_ptr<const RotSegments>;
+
+std::unordered_map<SegKey, std::pair<SegPtr, std::size_t>, SegKeyHash> g_segCache;
+std::list<SegKey> g_segLru;
+std::mutex        g_segMtx;
+std::size_t       g_segBytes = 0;
+constexpr std::size_t SEG_MAX_BYTES = 256ull << 20;
+
+} // anonymous namespace
+
+Vector rotational_broaden(const Vector& lam_in,
+                          const Vector& flux,
+                          const Vector& lam_out,
+                          double vsini_kms,
+                          double epsilon,
+                          int    n_kernel)
+{
+    if (lam_in.size() < 2 || lam_out.size() == 0) return flux;
+    if (vsini_kms <= 0.0) {
+        /*  No rotation: still has to land on lam_out, so interpolate. */
+        Vector out(lam_out.size());
+        const double* li = lam_in.data();
+        const std::ptrdiff_t M = lam_in.size();
+        std::ptrdiff_t j = 1;
+        for (Eigen::Index i = 0; i < lam_out.size(); ++i) {
+            const double x = lam_out[i];
+            while (j < M - 1 && li[j] < x) ++j;
+            const double t = (x - li[j - 1]) / (li[j] - li[j - 1]);
+            out[i] = flux[j - 1] + t * (flux[j] - flux[j - 1]);
+        }
+        return out;
+    }
+
+    SegKey key;
+    key.in        = make_grid_key(lam_in, vsini_kms, epsilon, n_kernel);
+    key.in_mid    = lam_in[lam_in.size() / 3];
+    key.n_out     = static_cast<std::size_t>(lam_out.size());
+    key.out_start = lam_out[0];
+    key.out_end   = lam_out[lam_out.size() - 1];
+
+    SegPtr hit;
+    {
+        std::lock_guard<std::mutex> lk(g_segMtx);
+        auto it = g_segCache.find(key);
+        if (it != g_segCache.end()) {
+            g_segLru.remove(key);
+            g_segLru.push_front(key);
+            hit = it->second.first;            // keep alive past the lock
+        }
+    }
+    if (hit) return apply_segments(flux, *hit);
+
+    auto seg = std::make_shared<const RotSegments>(
+        compute_segments(lam_in, lam_out, vsini_kms, epsilon, n_kernel));
+
+    {
+        std::lock_guard<std::mutex> lk(g_segMtx);
+        if (g_segCache.find(key) == g_segCache.end()) {
+            const std::size_t nb = seg->bytes();
+            g_segCache[key] = {seg, nb};
+            g_segLru.push_front(key);
+            g_segBytes += nb;
+            while (g_segCache.size() > 1 && g_segBytes > SEG_MAX_BYTES) {
+                const SegKey victim = g_segLru.back();
+                if (auto it = g_segCache.find(victim); it != g_segCache.end()) {
+                    g_segBytes -= std::min(g_segBytes, it->second.second);
+                    g_segCache.erase(it);
+                }
+                g_segLru.pop_back();
+            }
+        }
+    }
+
+    return apply_segments(flux, *seg);
 }
 
 /* ------------- Optional: Precompute weights for known grids ---------- */

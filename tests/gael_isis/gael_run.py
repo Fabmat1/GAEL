@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .jobs import Case, FitOutcome, ParamResult, TIED_PARAMS, UNTIED_PARAMS
+from .jobs import Case, FitOutcome, ParamResult, split_qualified
 
 DEFAULT_TIMEOUT = int(os.environ.get("GAEL_TEST_GAEL_TIMEOUT", "3600"))
 
@@ -23,8 +23,9 @@ DEFAULT_TIMEOUT = int(os.environ.get("GAEL_TEST_GAEL_TIMEOUT", "3600"))
 def build_input(case: Case, filenames: list[str], out_dir: str) -> dict:
     s = case.settings
     initial = {}
-    for pname, pvalue, pfrozen in s.initial:
-        initial[f"c1_{pname}"] = {"value": pvalue, "freeze": pfrozen}
+    for i, comp in enumerate(s.initial_by_component()):
+        for pname, pvalue, pfrozen in comp:
+            initial[f"c{i + 1}_{pname}"] = {"value": pvalue, "freeze": pfrozen}
 
     files = []
     for ref, fname in zip(case.spectra, filenames):
@@ -40,7 +41,7 @@ def build_input(case: Case, filenames: list[str], out_dir: str) -> dict:
 
     return {
         "initialGuess": initial,
-        "grids": [s.grid],
+        "grids": s.grid_list(),
         "observations": [
             {
                 "files": files,
@@ -165,23 +166,31 @@ def parse_csv(path: Path, case: Case) -> FitOutcome:
             except (TypeError, ValueError, KeyError):
                 continue
 
+    s = case.settings
+
+    def csv_name(name: str) -> str:
+        """Qualified names are already GAEL's CSV spelling; bare ones are c1."""
+        comp, bare = split_qualified(name)
+        return f"c{comp}_{bare}"
+
     tied: dict[str, ParamResult] = {}
-    for p in TIED_PARAMS:
-        hit = rows.get(f"c1_{p}")
+    for name in s.tied():
+        hit = rows.get(csv_name(name))
         if hit is not None:
-            tied[p] = ParamResult(value=hit[0], error=hit[1], frozen=hit[1] == 0.0)
+            tied[name] = ParamResult(value=hit[0], error=hit[1], frozen=hit[1] == 0.0)
 
     per_spectrum: list[dict[str, ParamResult]] = []
     for d in range(1, case.n_spectra + 1):
         entry: dict[str, ParamResult] = {}
-        for p in UNTIED_PARAMS:
+        for name in s.untied():
+            base = csv_name(name)
             # Untied only when more than one spectrum survived; a single
             # spectrum is written without the _d suffix.
-            hit = rows.get(f"c1_{p}_d{d}")
+            hit = rows.get(f"{base}_d{d}")
             if hit is None and d == 1:
-                hit = rows.get(f"c1_{p}")
+                hit = rows.get(base)
             if hit is not None:
-                entry[p] = ParamResult(value=hit[0], error=hit[1])
+                entry[name] = ParamResult(value=hit[0], error=hit[1])
         if entry:
             per_spectrum.append(entry)
 

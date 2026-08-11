@@ -10,6 +10,7 @@
 #include <map>
 #include "ParameterIndexer.hpp"
 #include <tuple>
+#include <utility>
 
 namespace specfit {
 
@@ -79,6 +80,14 @@ public:
         return n;
     }
 
+    // total count of telluric parameters (3 per spectrum that fits them)
+    int  n_telluric_params() const { return n_telluric_; }
+
+    /*  Where dataset d's telluric parameters start in the global vector,
+     *  or -1 if that spectrum has none.                                    */
+    int  telluric_offset_of(std::size_t d) const
+    { return telluric_param_offset(d); }
+
 private:
     void solve_stage(const std::set<std::string>& free_params,
                      int                          max_iterations,
@@ -96,6 +105,22 @@ private:
     void report_boundary_parameters() const;
     double chi2_current() const;      //  <──  new
 
+    /*  Grid coverage intersected over every component's grid. */
+    ModelGrid::ParameterBounds grid_bounds() const;
+
+    /*  Solver limits on one parameter: the grid answers for the axes it has,
+     *  the rest is fit policy (ISIS's stellar_set_ranges).                   */
+    std::pair<double,double> param_limits(
+            const ParamSpec& ps, int comp,
+            const ModelGrid::ParameterBounds& gb) const;
+
+    /*  Copy the current solution back into model_.params. */
+    void sync_model_params();
+
+    /*  Absolute index of dataset d's first telluric parameter, or -1 when
+     *  that spectrum does not fit a telluric component.                     */
+    int telluric_param_offset(std::size_t d) const;
+
 private:
 
     LMWorkspace lm_mem_;   // lives as long as the workflow lives
@@ -107,6 +132,14 @@ private:
 
     /* --- NEW : stellar-parameter mapping ---------------------------- */
     ParameterIndexer      indexer_;
+
+    /* --- telluric block: [stellar][telluric][continuum] --------------- */
+    int                   telluric_offset_ = 0;   // where the block starts
+    int                   n_telluric_      = 0;   // 3 per enabled spectrum
+    /*  Per dataset, per telluric parameter.  ISIS leaves all three free;
+     *  a spectrum whose tellurics were already removed simply does not
+     *  enable the component.                                              */
+    std::vector<std::array<bool,3>> frozen_telluric_;
 
     std::vector<double>   unified_params_;
     LMSolverSummary       summary_;

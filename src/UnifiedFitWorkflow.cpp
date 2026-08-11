@@ -70,28 +70,136 @@ UnifiedFitWorkflow::UnifiedFitWorkflow(
     /* ================================================================ */
     const int n_components = static_cast<int>(model_.params.size());
     const int n_datasets   = static_cast<int>(datasets_.size());
-    
-    indexer_.build(n_components, n_datasets, config_.untie_params);
-    
+
+    /*  Which parameters a component has comes from its grid: the canonical
+     *  eight, one per element axis the grid resolves, then sur_ratio.  An
+     *  HHE-only grid gives the historical nine.                            */
+    std::vector<std::vector<ParamSpec>> specs;
+    specs.reserve(static_cast<std::size_t>(n_components));
+    for (int c = 0; c < n_components; ++c)
+        specs.push_back(component_params(
+            c < static_cast<int>(model_.grids.size()) ? model_.grids[c].species()
+                                                      : std::vector<std::string>{}));
+
+    indexer_.build(specs, n_datasets, config_.untie_params);
+
     /* ----------  collect initial parameters into one big vector -------- */
     unified_params_.resize(indexer_.total_stellar_params);
     for (int c = 0; c < n_components; ++c) {
-        const auto& sp = model_.params[c];
-        for (int d = 0; d < n_datasets; ++d) {
-            unified_params_[ indexer_.get(c,d,0) ] = sp.vrad ;
-            unified_params_[ indexer_.get(c,d,1) ] = sp.vsini;
-            unified_params_[ indexer_.get(c,d,2) ] = sp.zeta ;
-            unified_params_[ indexer_.get(c,d,3) ] = sp.teff ;
-            unified_params_[ indexer_.get(c,d,4) ] = sp.logg ;
-            unified_params_[ indexer_.get(c,d,5) ] = sp.xi   ;
-            unified_params_[ indexer_.get(c,d,6) ] = sp.z    ;
-            unified_params_[ indexer_.get(c,d,7) ] = sp.he   ;
-            unified_params_[ indexer_.get(c,d,8) ] = sp.sur_ratio;
-        }
+        const auto& sp    = model_.params[c];
+        const auto& table = indexer_.params(c);
+        for (int d = 0; d < n_datasets; ++d)
+            for (int s = 0; s < static_cast<int>(table.size()); ++s)
+                unified_params_[ indexer_.get(c,d,s) ] =
+                    get_stellar_param(sp, table[static_cast<std::size_t>(s)]);
     }
+    /* ----------  telluric block, then the continuum block --------------- *
+     *  Layout of the global vector: [stellar][telluric][continuum anchors].
+     *  The telluric parameters belong to a spectrum rather than to a stellar
+     *  component, so they cannot live in the indexer; they sit in their own
+     *  block, and the continuum stays last so that everything which locates
+     *  it by counting back from the end keeps working.                     */
+    telluric_offset_ = indexer_.total_stellar_params;
+    n_telluric_      = 0;
+    frozen_telluric_.assign(datasets_.size(), {false, false, false});
+    for (const auto& ds : datasets_) {
+        if (!(ds.telluric_enabled && model_.telluric)) continue;
+        for (int k = 0; k < kNTelluricParams; ++k)
+            unified_params_.push_back(ds.telluric[static_cast<std::size_t>(k)]);
+        n_telluric_ += kNTelluricParams;
+    }
+
     for (const auto& ds : datasets_)
         unified_params_.insert(unified_params_.end(),
                                ds.cont_y.begin(), ds.cont_y.end());
+}
+
+/*  Absolute index of dataset d's first telluric parameter, or -1. */
+int UnifiedFitWorkflow::telluric_param_offset(std::size_t d) const
+{
+    if (!model_.telluric) return -1;
+    int off = telluric_offset_;
+    for (std::size_t i = 0; i < datasets_.size(); ++i) {
+        if (!datasets_[i].telluric_enabled) continue;
+        if (i == d) return off;
+        off += kNTelluricParams;
+    }
+    return -1;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Grid coverage, intersected over every component's grid.  A parameter tied
+ *  across two components has to stay inside both.
+ * ------------------------------------------------------------------------- */
+ModelGrid::ParameterBounds UnifiedFitWorkflow::grid_bounds() const
+{
+    std::vector<ModelGrid::ParameterBounds> all;
+    all.reserve(model_.grids.size());
+    for (const auto& g : model_.grids) all.push_back(g.get_parameter_bounds());
+    return ModelGrid::intersect(all);
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Solver limits on one parameter.  The grid answers for the axes it has
+ *  (teff, logg, xi, z, he and, on a metal grid, each element abundance); the
+ *  rest is fit policy and matches ISIS's stellar_set_ranges.
+ * ------------------------------------------------------------------------- */
+std::pair<double,double>
+UnifiedFitWorkflow::param_limits(const ParamSpec& ps, int comp,
+                                 const ModelGrid::ParameterBounds& gb) const
+{
+    constexpr double kWide = 1.0e10;      // "unbounded", as the solver sees it
+
+    switch (ps.kind) {
+        case ParamKind::Vrad:  return { -1000.0, 1000.0 };
+        case ParamKind::Vsini: return {     0.0,  500.0 };
+        case ParamKind::Zeta:  return {  -kWide,  kWide };   // deliberately free
+        case ParamKind::SurRatio:
+            /*  Component 1 defines the scale and is pinned to 1; the others
+             *  get ISIS's range (stellar_set_ranges: 0 .. 1500).            */
+            return (comp == 0) ? std::make_pair(1.0, 1.0)
+                               : std::make_pair(0.0, 1500.0);
+        case ParamKind::Abundance: {
+            /*  Each element is bounded by its own axis in this component's
+             *  grid -- unlike the stellar axes there is nothing to intersect,
+             *  since an abundance is never shared between components.       */
+            if (comp < static_cast<int>(model_.grids.size()))
+                if (const GridAxis* ax = model_.grids[comp].axis(ps.name))
+                    if (ax->values.size() > 0)
+                        return { ax->values[0],
+                                 ax->values[ax->values.size() - 1] };
+            return { -kWide, kWide };
+        }
+        default: {
+            /*  Bound a component by *its own* grid.  Every component has its
+             *  own teff/logg/xi/z/he slot -- tying is across datasets, not
+             *  across components -- so the intersection over all grids
+             *  over-constrains a binary whose components sit on different
+             *  grids: with Feros_3 (21-26 kK) and Feros_5 (25-29 kK) the
+             *  intersection is 25-26 kK, which excluded both components'
+             *  true temperatures and collapsed the fit.  `gb` remains the
+             *  fallback for a component with no grid of its own.           */
+            if (comp < static_cast<int>(model_.grids.size())) {
+                const auto own = model_.grids[comp].get_parameter_bounds();
+                if (auto b = own.for_kind(ps.kind)) return *b;
+            }
+            if (auto b = gb.for_kind(ps.kind)) return *b;
+            return { -kWide, kWide };
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Push the current solution back into model_.params, so callers reading the
+ *  model see the fit.  Dataset 0 is the representative one: a tied parameter
+ *  has the same value everywhere, and an untied one (vrad) has never had a
+ *  single value to report.
+ * ------------------------------------------------------------------------- */
+void UnifiedFitWorkflow::sync_model_params()
+{
+    for (int c = 0; c < static_cast<int>(model_.params.size()); ++c)
+        model_.params[static_cast<std::size_t>(c)] =
+            stellar_params_from(indexer_, unified_params_, c, 0);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -105,10 +213,6 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
     static int dbg_stage_counter = 0;
     const int n_components  = static_cast<int>(model_.params.size());
     const int stellar_total = indexer_.total_stellar_params;
-
-    constexpr int NP = ParameterIndexer::kNStellarParams;
-    const char* names[NP] = {"vrad","vsini","zeta","teff",
-        "logg","xi","z","he","sur_ratio"};
 
     std::vector<DatasetInfo> ds_infos;
     std::vector<ModelGrid*>  grid_ptrs;
@@ -127,6 +231,12 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
         info.cont_param_offset = cont_offset;
         info.cont_param_count  = ds.cont_y.size();
 
+        if (ds.telluric_enabled && model_.telluric) {
+            info.telluric              = model_.telluric.get();
+            info.telluric_param_offset =
+                telluric_param_offset(ds_infos.size());
+        }
+
         ds_infos.push_back(std::move(info));
         const int n_kept = std::accumulate(ds.obs.ignoreflag.begin(),
                                ds.obs.ignoreflag.end(), 0);
@@ -137,84 +247,38 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
 
     MultiDatasetCost cost(ds_infos, grid_ptrs, n_components,
                               indexer_,
-                               total_residuals, cont_offset);
+                               total_residuals, cont_offset, n_telluric_);
 
-    const int Npar = stellar_total + cont_offset;
+    const int Npar      = stellar_total + n_telluric_ + cont_offset;
+    const int cont_base = stellar_total + n_telluric_;   // first anchor
 
     /* ---- b)   build lower / upper bounds ------------------------------ */
     std::vector<double> lo(Npar, -1.0e10);
     std::vector<double> hi(Npar,  1.0e10);
     
-    // Get bounds from the first grid (assuming all grids have same bounds)
-    // If grids have different bounds, take the intersection
-    ModelGrid::ParameterBounds grid_bounds;
-    bool first_grid = true;
-    
-    for (auto& grid : model_.grids) {
-        auto bounds = grid.get_parameter_bounds();
-        if (first_grid) {
-            grid_bounds = bounds;
-            first_grid = false;
-        } else {
-            // Take intersection of bounds (most restrictive)
-            grid_bounds.teff_min = std::max(grid_bounds.teff_min, bounds.teff_min);
-            grid_bounds.teff_max = std::min(grid_bounds.teff_max, bounds.teff_max);
-            grid_bounds.logg_min = std::max(grid_bounds.logg_min, bounds.logg_min);
-            grid_bounds.logg_max = std::min(grid_bounds.logg_max, bounds.logg_max);
-            grid_bounds.z_min = std::max(grid_bounds.z_min, bounds.z_min);
-            grid_bounds.z_max = std::min(grid_bounds.z_max, bounds.z_max);
-            grid_bounds.he_min = std::max(grid_bounds.he_min, bounds.he_min);
-            grid_bounds.he_max = std::min(grid_bounds.he_max, bounds.he_max);
-            grid_bounds.xi_min = std::max(grid_bounds.xi_min, bounds.xi_min);
-            grid_bounds.xi_max = std::min(grid_bounds.xi_max, bounds.xi_max);
-        }
-    }
-    
-    // Apply grid bounds to parameter vectors
-    for (int c = 0; c < n_components; ++c) {
-        for (std::size_t d = 0; d < datasets_.size(); ++d) {
-            // vrad
-            int idx = indexer_.get(c, static_cast<int>(d), 0);
-            lo[idx] = -1000.0; hi[idx] = 1000.0;
-            
-            // vsini
-            idx = indexer_.get(c, static_cast<int>(d), 1);
-            lo[idx] = 0.0; hi[idx] = 500.0;
-            
-            // zeta (no specific bounds)
-            
-            // teff
-            idx = indexer_.get(c, static_cast<int>(d), 3);
-            lo[idx] = grid_bounds.teff_min;
-            hi[idx] = grid_bounds.teff_max;
-            
-            // logg
-            idx = indexer_.get(c, static_cast<int>(d), 4);
-            lo[idx] = grid_bounds.logg_min;
-            hi[idx] = grid_bounds.logg_max;
-            
-            // xi
-            idx = indexer_.get(c, static_cast<int>(d), 5);
-            if (grid_bounds.xi_min > -1e9) {  // If grid has xi bounds
-                lo[idx] = grid_bounds.xi_min;
-                hi[idx] = grid_bounds.xi_max;
-            }
-            
-            // z (metallicity)
-            idx = indexer_.get(c, static_cast<int>(d), 6);
-            lo[idx] = grid_bounds.z_min;
-            hi[idx] = grid_bounds.z_max;
-            
-            // he
-            idx = indexer_.get(c, static_cast<int>(d), 7);
-            lo[idx] = grid_bounds.he_min;
-            hi[idx] = grid_bounds.he_max;
+    /*  Grid coverage, intersected over the components' grids; everything the
+     *  grid has no opinion about keeps the wide default set above.          */
+    const ModelGrid::ParameterBounds gb = grid_bounds();
 
-            /* sur_ratio: component 1 defines the scale and is pinned to 1;
-               the others get ISIS's range (stellar_set_ranges: 0 .. 1500). */
-            idx = indexer_.get(c, static_cast<int>(d), 8);
-            if (c == 0) { lo[idx] = 1.0; hi[idx] = 1.0; }
-            else        { lo[idx] = 0.0; hi[idx] = 1500.0; }
+    for (int c = 0; c < n_components; ++c) {
+        const auto& table = indexer_.params(c);
+        for (std::size_t s = 0; s < table.size(); ++s) {
+            auto lim = param_limits(table[s], c, gb);
+            for (std::size_t d = 0; d < datasets_.size(); ++d) {
+                const int idx = indexer_.get(c, static_cast<int>(d),
+                                             static_cast<int>(s));
+                /*  An abundance of 10 or more means "this element is not in
+                 *  the model" (ISIS: hard_max=_Inf so such a value survives).
+                 *  Clamping it back onto the grid axis would silently switch
+                 *  the element on again, so pin it where the user put it.   */
+                if (table[s].kind == ParamKind::Abundance &&
+                    unified_params_[idx] >= 10.0) {
+                    lo[idx] = hi[idx] = unified_params_[idx];
+                    continue;
+                }
+                lo[idx] = lim.first;
+                hi[idx] = lim.second;
+            }
         }
     }
 
@@ -224,9 +288,20 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
      *  should have to climb past twice the brightest pixel of its own
      *  spectrum.  GAEL left these unbounded (+-1e10), so a poorly constrained
      *  anchor could run away and drag the stellar parameters with it.        */
+    /*  Telluric limits, as ISIS's telluric_default sets them. */
+    for (std::size_t d = 0; d < datasets_.size(); ++d) {
+        const int base = ds_infos[d].telluric_param_offset;
+        if (base < 0) continue;
+        for (int k = 0; k < kNTelluricParams; ++k) {
+            const auto lim = telluric_param_limits(k);
+            lo[base + k] = lim.first;
+            hi[base + k] = lim.second;
+        }
+    }
+
     for (std::size_t d = 0; d < datasets_.size(); ++d) {
         const auto& ds   = datasets_[d];
-        const int   base = stellar_total + ds_infos[d].cont_param_offset;
+        const int   base = cont_base + ds_infos[d].cont_param_offset;
         const double fmax = ds.obs.flux.size() ? ds.obs.flux.maxCoeff() : 0.0;
         const double cap  = (std::isfinite(fmax) && fmax > 0.0) ? 2.0 * fmax : 1.0e10;
         for (std::size_t i = 0; i < ds.cont_y.size(); ++i) {
@@ -249,20 +324,23 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
         auto& frz = frozen_status_[c];
 
         auto token = [&](const std::string& name){ return "c"+std::to_string(c+1)+"_"+name; };
+        const auto& table = indexer_.params(c);
         for (std::size_t d = 0; d < datasets_.size(); ++d)
-            for (int p = 0; p < NP; ++p)
+            for (std::size_t p = 0; p < table.size(); ++p)
             {
+                const auto& ps = table[p];
                 if (!(all_requested ||
-                      free_params.count(token(names[p])))) continue;
-                if (frz.at(names[p])) continue;
+                      free_params.count(token(ps.name)))) continue;
+                if (frz.at(ps.name)) continue;
                 /*  c1_sur_ratio *defines* the scale the other components are
                  *  measured against, so it is 1 by construction, never a
                  *  degree of freedom -- ISIS pins it the same way
                  *  (min=max=1, frozen).  A single-component fit therefore has
                  *  no free surface ratio at all, which is what keeps its
                  *  otherwise identically-zero Jacobian column out of JtJ.   */
-                if (p == 8 && c == 0) continue;
-                mark_free(indexer_.get(c,static_cast<int>(d),p));
+                if (ps.kind == ParamKind::SurRatio && c == 0) continue;
+                mark_free(indexer_.get(c,static_cast<int>(d),
+                                       static_cast<int>(p)));
             }
     }
 
@@ -281,7 +359,7 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
             const auto& cx  = ds.cont_x;
             const int   na  = static_cast<int>(ds.cont_y.size());
             const int   nx  = static_cast<int>(cx.size());
-            const int   base = stellar_total + ds_infos[d].cont_param_offset;
+            const int   base = cont_base + ds_infos[d].cont_param_offset;
 
             for (int i = 0; i < na; ++i) {
                 const double x_lo = cx[std::max(0, i - 1)];
@@ -299,6 +377,24 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
                     if (bin_lo > x_lo && bin_lo < x_hi) { constrained = true; break; }
                 }
                 if (constrained) mark_free(base + i);
+            }
+        }
+    }
+
+    /* ---- telluric parameters ------------------------------------------ *
+     *  ISIS leaves airmass, pwv and barycorr free (telluric_default) and
+     *  freezes all three when the pipeline is told the spectrum has already
+     *  had its tellurics divided out -- which here is expressed by the
+     *  spectrum simply not enabling the component.  They join the fit from
+     *  the same stage the stellar parameters do, since a continuum-only
+     *  stage cannot see them.                                              */
+    if (all_requested || free_params.count("telluric")) {
+        for (std::size_t d = 0; d < datasets_.size(); ++d) {
+            const int base = ds_infos[d].telluric_param_offset;
+            if (base < 0) continue;
+            for (int k = 0; k < kNTelluricParams; ++k) {
+                if (frozen_telluric_[d][static_cast<std::size_t>(k)]) continue;
+                mark_free(base + k);
             }
         }
     }
@@ -321,7 +417,14 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
         const auto& rcnt = cost.row_counts();
         col_blocks.push_back({0, stellar_total, 0, total_residuals});
         for (std::size_t d = 0; d < datasets_.size(); ++d) {
-            const int cb = stellar_total + ds_infos[d].cont_param_offset;
+            /*  A spectrum's telluric parameters reach only that spectrum's
+             *  rows, exactly like its continuum anchors.                    */
+            const int tb = ds_infos[d].telluric_param_offset;
+            if (tb >= 0)
+                col_blocks.push_back({tb, tb + kNTelluricParams,
+                                      roff[d], roff[d] + rcnt[d]});
+
+            const int cb = cont_base + ds_infos[d].cont_param_offset;
             col_blocks.push_back({cb, cb + ds_infos[d].cont_param_count,
                                   roff[d], roff[d] + rcnt[d]});
         }
@@ -362,23 +465,24 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
             // Inflate uncertainty for boundary parameters
             summary_.param_uncertainties[i] *= 2.0;
             
-            int comp = -1, dataset = -1, param_type = -1;
+            int comp = -1; std::string param_name;
             // Decode which parameter this is
             for (int c = 0; c < n_components && comp < 0; ++c) {
+                const auto& table = indexer_.params(c);
                 for (int d = 0; d < static_cast<int>(datasets_.size()); ++d) {
-                    for (int p = 0; p < NP; ++p) {
-                        if (indexer_.get(c, d, p) == i) {
-                            comp = c; dataset = d; param_type = p;
+                    for (std::size_t p = 0; p < table.size(); ++p) {
+                        if (indexer_.get(c, d, static_cast<int>(p)) == i) {
+                            comp = c; param_name = table[p].name;
                             break;
                         }
                     }
                     if (comp >= 0) break;
                 }
             }
-            
+
             if (comp >= 0) {
-                std::cout << "  Warning: Component " << (comp+1) 
-                            << " parameter " << names[param_type]
+                std::cout << "  Warning: Component " << (comp+1)
+                            << " parameter " << param_name
                             << " at " << (at_lower ? "lower" : "upper")
                             << " grid boundary (" << x[i] << ")\n";
             }
@@ -425,7 +529,10 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
 /*  small wrappers for the six stages                                        */
 /* ------------------------------------------------------------------------- */
 void UnifiedFitWorkflow::stage1_continuum_only() {
-    solve_stage( { "continuum" }, 100 );
+    /*  ISIS's "First guess for the continuum" freezes only `stellar(1).*`
+     *  and fits everything else that is free -- which includes the telluric
+     *  parameters (spectroscopy_automated.sl ~972).                        */
+    solve_stage( { "continuum", "telluric" }, 100 );
 }
 
 void UnifiedFitWorkflow::stage2_continuum_vrad() {
@@ -463,17 +570,7 @@ void UnifiedFitWorkflow::quick_refit(int max_iterations)
     solve_stage({ "all", "continuum" }, max_iterations, /*add_powell=*/false);
 
     // propagate to model.params so callers reading the model see the refit
-    for (std::size_t c = 0; c < model_.params.size(); ++c) {
-        model_.params[c].vrad  = unified_params_[ indexer_.get(c,0,0) ];
-        model_.params[c].vsini = unified_params_[ indexer_.get(c,0,1) ];
-        model_.params[c].zeta  = unified_params_[ indexer_.get(c,0,2) ];
-        model_.params[c].teff  = unified_params_[ indexer_.get(c,0,3) ];
-        model_.params[c].logg  = unified_params_[ indexer_.get(c,0,4) ];
-        model_.params[c].xi    = unified_params_[ indexer_.get(c,0,5) ];
-        model_.params[c].z     = unified_params_[ indexer_.get(c,0,6) ];
-        model_.params[c].he    = unified_params_[ indexer_.get(c,0,7) ];
-        model_.params[c].sur_ratio = unified_params_[ indexer_.get(c,0,8) ];
-    }
+    sync_model_params();
 }
 
 double UnifiedFitWorkflow::chi2_current() const
@@ -521,7 +618,7 @@ void UnifiedFitWorkflow::stage5_auto_freeze_vsini()
 
     for (int c = 0; c < n_components; ++c) {
         if (frozen_status_[c].at("vsini")) continue;
-        if (unified_params_[indexer_.get(c, 0, 1)] < vsini_thres)
+        if (unified_params_[indexer_.index_of(c, 0, "vsini")] < vsini_thres)
             to_freeze.push_back(c);
     }
 
@@ -535,7 +632,8 @@ void UnifiedFitWorkflow::stage5_auto_freeze_vsini()
 
             // Set vsini to 0 for all datasets
             for (size_t d = 0; d < datasets_.size(); ++d) {
-                unified_params_[indexer_.get(c, static_cast<int>(d), 1)] = 0.0;
+                unified_params_[indexer_.index_of(c, static_cast<int>(d),
+                                                  "vsini")] = 0.0;
             }
         }
 
@@ -584,16 +682,8 @@ void UnifiedFitWorkflow::stage5b_auto_freeze_sur_ratio()
         Vector den = Vector::Zero(np);
 
         for (int c = 0; c < n_components; ++c) {
-            StellarParams sp;
-            sp.vrad      = unified_params_[indexer_.get(c,did,0)];
-            sp.vsini     = unified_params_[indexer_.get(c,did,1)];
-            sp.zeta      = unified_params_[indexer_.get(c,did,2)];
-            sp.teff      = unified_params_[indexer_.get(c,did,3)];
-            sp.logg      = unified_params_[indexer_.get(c,did,4)];
-            sp.xi        = unified_params_[indexer_.get(c,did,5)];
-            sp.z         = unified_params_[indexer_.get(c,did,6)];
-            sp.he        = unified_params_[indexer_.get(c,did,7)];
-            sp.sur_ratio = unified_params_[indexer_.get(c,did,8)];
+            const StellarParams sp =
+                stellar_params_from(indexer_, unified_params_, c, did);
 
             Spectrum syn = compute_synthetic(model_.grids[c], sp, ds.obs.lambda,
                                              ds.resOffset, ds.resSlope,
@@ -617,20 +707,23 @@ void UnifiedFitWorkflow::stage5b_auto_freeze_sur_ratio()
 
     /* ---- retire the undetected ones ------------------------------------ */
     bool froze_any = false;
-    const char* names[ParameterIndexer::kNStellarParams] =
-        {"vrad","vsini","zeta","teff","logg","xi","z","he","sur_ratio"};
 
     for (int c = 1; c < n_components; ++c) {
         if (frozen_status_[c].at("sur_ratio")) continue;   // user already fixed it
-        const double sr = unified_params_[indexer_.get(c,0,8)];
+        const int sr_idx = indexer_.index_of(c, 0, "sur_ratio");
+        const double sr  = unified_params_[sr_idx];
         if (!(sr < config_.sur_ratio_thres ||
               contribution[c] <= config_.c2_detection_thres)) continue;
 
         std::cout << "[Stage 5b] Freezing c" << (c + 1)
                   << " contribution to zero.\n";
         for (std::size_t d = 0; d < datasets_.size(); ++d)
-            unified_params_[indexer_.get(c,static_cast<int>(d),8)] = 0.0;
-        for (const char* n : names) frozen_status_[c][n] = true;
+            unified_params_[indexer_.index_of(c, static_cast<int>(d),
+                                              "sur_ratio")] = 0.0;
+        /*  The *whole* component is frozen, not just its surface ratio: at
+         *  s_k = 0 it drops out of the residuals, so every one of its
+         *  parameters would have an identically-zero Jacobian column.       */
+        for (const auto& ps : indexer_.params(c)) frozen_status_[c][ps.name] = true;
         froze_any = true;
     }
 
@@ -786,77 +879,50 @@ void UnifiedFitWorkflow::stage6_rescale_and_reject()
 
 void UnifiedFitWorkflow::stage7_final() {
     const int n_components = static_cast<int>(model_.params.size());
-    const char* names[8] = {"vrad","vsini","zeta","teff","logg","xi","z","he"};
     const double boundary_tol = 1e-6;
-    
-    // Get grid bounds
-    ModelGrid::ParameterBounds grid_bounds;
-    bool first_grid = true;
-    for (auto& grid : model_.grids) {
-        auto bounds = grid.get_parameter_bounds();
-        if (first_grid) {
-            grid_bounds = bounds;
-            first_grid = false;
-        } else {
-            grid_bounds.teff_min = std::max(grid_bounds.teff_min, bounds.teff_min);
-            grid_bounds.teff_max = std::min(grid_bounds.teff_max, bounds.teff_max);
-            grid_bounds.logg_min = std::max(grid_bounds.logg_min, bounds.logg_min);
-            grid_bounds.logg_max = std::min(grid_bounds.logg_max, bounds.logg_max);
-            grid_bounds.z_min = std::max(grid_bounds.z_min, bounds.z_min);
-            grid_bounds.z_max = std::min(grid_bounds.z_max, bounds.z_max);
-            grid_bounds.he_min = std::max(grid_bounds.he_min, bounds.he_min);
-            grid_bounds.he_max = std::min(grid_bounds.he_max, bounds.he_max);
-            grid_bounds.xi_min = std::max(grid_bounds.xi_min, bounds.xi_min);
-            grid_bounds.xi_max = std::min(grid_bounds.xi_max, bounds.xi_max);
-        }
-    }
-    
+
+    const ModelGrid::ParameterBounds gb = grid_bounds();
+
     // Do initial full fit
     std::cout << "[Stage 7] Final fit ...\n";
-    stage4_full(); 
-    
+    stage4_full();
+
     // Check for boundary parameters
     bool any_at_boundary = false;
-    std::vector<std::tuple<int, int, std::string>> boundary_params;  // comp, param_idx, name
-    
-    for (int c = 0; c < n_components; ++c) {
-        // Get bounds for each parameter type
-        std::vector<std::pair<double, double>> param_bounds = {
-            {-1000.0, 1000.0},           // vrad
-            {0.0, 500.0},                // vsini
-            {-1e10, 1e10},               // zeta (no bounds)
-            {grid_bounds.teff_min, grid_bounds.teff_max},  // teff
-            {grid_bounds.logg_min, grid_bounds.logg_max},  // logg
-            {grid_bounds.xi_min, grid_bounds.xi_max},      // xi
-            {grid_bounds.z_min, grid_bounds.z_max},        // z
-            {grid_bounds.he_min, grid_bounds.he_max}       // he
-        };
+    std::vector<std::pair<int, std::string>> boundary_params;  // comp, name
 
-        /*  sur_ratio is deliberately not in this list.  Freezing it alone at
-         *  its lower bound of 0 would leave the rest of that component free
-         *  while contributing nothing, i.e. eight exactly-zero Jacobian
-         *  columns.  A vanishing component is retired as a whole, by
-         *  stage5b_auto_freeze_sur_ratio.                                    */
-        for (int p = 0; p < 8; ++p) {
+    for (int c = 0; c < n_components; ++c) {
+        const auto& table = indexer_.params(c);
+        for (std::size_t p = 0; p < table.size(); ++p) {
+            const auto& ps = table[p];
+
+            /*  sur_ratio is deliberately excluded.  Freezing it alone at its
+             *  lower bound of 0 would leave the rest of that component free
+             *  while contributing nothing, i.e. a full set of exactly-zero
+             *  Jacobian columns.  A vanishing component is retired as a whole,
+             *  by stage5b_auto_freeze_sur_ratio.                             */
+            if (ps.kind == ParamKind::SurRatio) continue;
+
             // Skip if already frozen
-            if (frozen_status_[c].at(names[p])) continue;
-            
-            int idx = indexer_.get(c, 0, p);  // Check first dataset
-            double val = unified_params_[idx];
-            double lo = param_bounds[p].first;
-            double hi = param_bounds[p].second;
-            
+            if (frozen_status_[c].at(ps.name)) continue;
+
+            const int idx = indexer_.get(c, 0, static_cast<int>(p)); // dataset 0
+            const double val = unified_params_[idx];
+            const auto lim = param_limits(ps, c, gb);
+            const double lo = lim.first;
+            const double hi = lim.second;
+
             // Check if at boundary
             bool at_lower = (val - lo) < boundary_tol * std::abs(lo + 1.0);
             bool at_upper = (hi - val) < boundary_tol * std::abs(hi + 1.0);
-            
+
             if (at_lower || at_upper) {
-                std::cout << "  Warning: Component " << (c+1) 
-                          << " parameter " << names[p]
+                std::cout << "  Warning: Component " << (c+1)
+                          << " parameter " << ps.name
                           << " at " << (at_lower ? "lower" : "upper")
                           << " grid boundary (" << val << ")\n";
                 any_at_boundary = true;
-                boundary_params.push_back(std::make_tuple(c, p, std::string(names[p])));
+                boundary_params.emplace_back(c, ps.name);
             }
         }
     }
@@ -868,10 +934,7 @@ void UnifiedFitWorkflow::stage7_final() {
         std::cout << "[Stage 7] Freezing boundary parameters and refitting...\n";
         
         // Freeze all boundary parameters
-        for (const auto& param_info : boundary_params) {
-            int comp = std::get<0>(param_info);
-            std::string param_name = std::get<2>(param_info);
-            
+        for (const auto& [comp, param_name] : boundary_params) {
             frozen_status_[comp][param_name] = true;
             std::cout << "  Frozen: Component " << (comp+1) 
                       << " " << param_name << "\n";
@@ -948,13 +1011,13 @@ void UnifiedFitWorkflow::run()
         std::cout << "[stage-timing] " << name << " cum_t=" << std::fixed
                   << std::setprecision(2) << t
                   << "s chi2=" << std::setprecision(3) << summary_.final_chi2;
-        for (std::size_t c = 0; c < model_.params.size(); ++c)
+        for (int c = 0; c < static_cast<int>(model_.params.size()); ++c)
             std::cout << " c" << (c + 1)
-                      << "_teff=" << unified_params_[indexer_.get(c, 0, 3)]
+                      << "_teff=" << unified_params_[indexer_.index_of(c, 0, "teff")]
                       << " c" << (c + 1)
-                      << "_logg=" << unified_params_[indexer_.get(c, 0, 4)]
+                      << "_logg=" << unified_params_[indexer_.index_of(c, 0, "logg")]
                       << " c" << (c + 1)
-                      << "_he=" << unified_params_[indexer_.get(c, 0, 7)];
+                      << "_he=" << unified_params_[indexer_.index_of(c, 0, "he")];
         std::cout << '\n';
     };
 
@@ -975,19 +1038,9 @@ void UnifiedFitWorkflow::run()
     if (do_6) { std::cout << "[Stage 6] Iterative Noise Rescaling and Outlier Rejection ...\n"; stage6_rescale_and_reject(); mark("stage6"); }
     std::cout << "[Stage 7] Final Fit ...\n"; stage7_final(); mark("stage7");
     final_uncertainties_ = summary_.param_uncertainties;
-    
+
     /* update model structure with the final parameter values */
-    for (std::size_t c = 0; c < model_.params.size(); ++c) {
-        model_.params[c].vrad  = unified_params_[ indexer_.get(c,0,0) ];
-        model_.params[c].vsini = unified_params_[ indexer_.get(c,0,1) ];
-        model_.params[c].zeta  = unified_params_[ indexer_.get(c,0,2) ];
-        model_.params[c].teff  = unified_params_[ indexer_.get(c,0,3) ];
-        model_.params[c].logg  = unified_params_[ indexer_.get(c,0,4) ];
-        model_.params[c].xi    = unified_params_[ indexer_.get(c,0,5) ];
-        model_.params[c].z     = unified_params_[ indexer_.get(c,0,6) ];
-        model_.params[c].he    = unified_params_[ indexer_.get(c,0,7) ];
-        model_.params[c].sur_ratio = unified_params_[ indexer_.get(c,0,8) ];
-    }
+    sync_model_params();
 }
 
 
@@ -1002,19 +1055,12 @@ Vector UnifiedFitWorkflow::get_model_for_dataset(size_t dataset_idx) const {
     // Extract current stellar parameters (dataset-specific)
     std::vector<StellarParams> stellar(model_.params.size());
     const int didx = static_cast<int>(dataset_idx);
-    for (int c = 0; c < static_cast<int>(model_.params.size()); ++c) {
-        stellar[c].vrad  = unified_params_[ indexer_.get(c,didx,0) ];
-        stellar[c].vsini = unified_params_[ indexer_.get(c,didx,1) ];
-        stellar[c].zeta  = unified_params_[ indexer_.get(c,didx,2) ];
-        stellar[c].teff  = unified_params_[ indexer_.get(c,didx,3) ];
-        stellar[c].logg  = unified_params_[ indexer_.get(c,didx,4) ];
-        stellar[c].xi    = unified_params_[ indexer_.get(c,didx,5) ];
-        stellar[c].z     = unified_params_[ indexer_.get(c,didx,6) ];
-        stellar[c].he    = unified_params_[ indexer_.get(c,didx,7) ];
-        stellar[c].sur_ratio = unified_params_[ indexer_.get(c,didx,8) ];
-    }
+    for (int c = 0; c < static_cast<int>(model_.params.size()); ++c)
+        stellar[c] = stellar_params_from(indexer_, unified_params_, c, didx);
     
-    /* -------- continuum anchors live in ONE big block at the very end --- */
+    /* -------- continuum anchors live in ONE big block at the very end --- *
+     *  (the telluric block sits between them and the stellar parameters, so
+     *   counting back from the end is still the way to find them)          */
     int total_cont = 0;
     for (const auto& dsi : datasets_) total_cont += dsi.cont_y.size();
     
@@ -1057,7 +1103,21 @@ Vector UnifiedFitWorkflow::get_model_for_dataset(size_t dataset_idx) const {
     }
 
     // Apply continuum
-    return model.cwiseProduct(continuum);
+    model = model.cwiseProduct(continuum);
+
+    /*  ... and the atmosphere, when this spectrum fits one: ISIS's model is
+     *  cspline * stellar * telluric.                                       */
+    const int tb = telluric_param_offset(dataset_idx);
+    if (tb >= 0 && model_.telluric) {
+        const Vector tr = model_.telluric->transmission(
+            ds.obs.lambda,
+            unified_params_[tb + static_cast<int>(TelluricParam::Airmass)],
+            unified_params_[tb + static_cast<int>(TelluricParam::Pwv)],
+            unified_params_[tb + static_cast<int>(TelluricParam::Barycorr)],
+            ds.resOffset, ds.resSlope);
+        model = model.cwiseProduct(tr);
+    }
+    return model;
 }
 
 } // namespace specfit

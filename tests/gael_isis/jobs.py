@@ -67,8 +67,64 @@ class FitSettings:
     filter_snr: float = 5.0
     auto_freeze_vsini: bool = True
 
+    # ---------------------------------------------------------------- new
+    # Multi-component and metal suites.  All of these default to empty, in
+    # which case everything below reproduces the single-component behaviour
+    # byte-for-byte -- which matters because the ISIS reference cache is keyed
+    # on the generated script, and refilling it costs ~45 min on 16 cores.
+    #
+    # ``grids`` replaces ``grid`` when set (one entry per stellar component).
+    # ``component_initial[i]`` is component i+1's ((name, value, frozen), ...);
+    # when set it replaces ``initial``, and the names are written out
+    # component-qualified ("c2_teff", "c1_FE") for both codes.
+    grids: tuple[str, ...] = ()
+    component_initial: tuple[tuple[tuple[str, float, bool], ...], ...] = ()
+    # Fully-qualified names to compare, e.g. ("c1_teff", "c2_teff", "c1_FE").
+    # Empty means the legacy bare-name set.
+    tied_params: tuple[str, ...] = ()
+    untied_params: tuple[str, ...] = ()
+    # ISIS's auto_freeze_sur_ratio defaults to 1, which retires component 2
+    # whenever its seed surface ratio is below sur_ratio_thres (5) -- i.e. for
+    # every physically sensible binary.  None leaves the qualifier out of the
+    # generated script entirely, so single-component cases are unchanged.
+    auto_freeze_sur_ratio: bool | None = None
+
     def as_dict(self) -> dict:
         return asdict(self)
+
+    # -------------------------------------------------------- accessors
+    @property
+    def legacy(self) -> bool:
+        """True for the original single-component, bare-name form."""
+        return not self.grids and not self.component_initial
+
+    def grid_list(self) -> list[str]:
+        return list(self.grids) if self.grids else [self.grid]
+
+    @property
+    def n_components(self) -> int:
+        return len(self.grid_list())
+
+    def tied(self) -> tuple[str, ...]:
+        return self.tied_params or TIED_PARAMS
+
+    def untied(self) -> tuple[str, ...]:
+        return self.untied_params or UNTIED_PARAMS
+
+    def initial_by_component(self) -> list[tuple[tuple[str, float, bool], ...]]:
+        """Per-component initial guesses, whichever form the case used."""
+        if self.component_initial:
+            return list(self.component_initial)
+        return [self.initial]
+
+
+def split_qualified(name: str) -> tuple[int, str]:
+    """``"c2_teff" -> (2, "teff")``; an unqualified name belongs to component 1."""
+    if len(name) > 2 and name[0] == "c" and "_" in name:
+        head, _, rest = name.partition("_")
+        if head[1:].isdigit():
+            return int(head[1:]), rest
+    return 1, name
 
 
 @dataclass

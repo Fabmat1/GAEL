@@ -2,6 +2,7 @@
 #include "specfit/JsonUtils.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <set>
 #include <stdexcept>
 
 using nlohmann::json;
@@ -48,6 +49,9 @@ GlobalSettings global_settings_from_json_file(const std::string& path)
     get_d("surRatioThres",      gs.sur_ratio_thres);
     get_d("c2DetectionThres",   gs.c2_detection_thres);
 
+    get_b("addTelluricModel",   gs.add_telluric_model);
+    get_b("telluricIsisPwvScale", gs.telluric_isis_pwv_scale);
+
     return gs;
 }
 
@@ -91,6 +95,25 @@ FitInput fit_input_from_json_file(const std::string& path)
             if (sr.contains("value"))  comp.sur_ratio        = sr["value"].get<double>();
             if (sr.contains("freeze")) comp.freeze_sur_ratio = sr["freeze"].get<bool>();
         }
+
+        /* ---- element abundances: any other cN_<KEY> entry ------------- *
+         *  The grid decides which names are meaningful, so anything that is
+         *  not one of the fixed parameters above is taken to be an element
+         *  and validated later against the grid's species list.  ISIS names
+         *  them in upper case (cN_FE, cN_SI); the check is case-sensitive
+         *  because the grid's directory names are.                        */
+        static const std::set<std::string> fixed = {
+            "vrad","vsini","zeta","teff","logg","xi","z","HE","sur_ratio" };
+
+        for (const auto& [key, val] : ig.items()) {
+            if (key.rfind(pre, 0) != 0) continue;        // other component
+            const std::string name = key.substr(pre.size());
+            if (fixed.count(name)) continue;
+            if (!val.is_object() || !val.contains("value")) continue;
+
+            comp.abundances[name] = val.at("value").get<double>();
+            comp.freeze_abundances[name] = val.value("freeze", false);
+        }
     }
 
     if (j.contains("outputPath"))
@@ -114,6 +137,13 @@ FitInput fit_input_from_json_file(const std::string& path)
             f.resOffset = fj.value("resOffset", 0.0);
             f.resSlope  = fj.value("resSlope",  0.0);
             f.barycorr  = fj.value("barycorr",  0.0);
+
+            /*  Telluric seeds; ISIS's defaults (airmass 1, pwv 1 mm).  An
+             *  airmass of 0, or "fitTelluric": false, switches the component
+             *  off for this spectrum.                                       */
+            f.airmass      = fj.value("airmass", 1.0);
+            f.pwv          = fj.value("pwv",     1.0);
+            f.fit_telluric = fj.value("fitTelluric", true);
 
             if (fj.contains("waveCut"))
                 f.waveCut = fj["waveCut"].get<std::array<double,2>>();

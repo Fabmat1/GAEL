@@ -120,13 +120,16 @@ def collect(results) -> Collection:
                 return False
             return True
 
-        for p in TIED_PARAMS:
+        # The parameter set is a property of the case: the abundance and
+        # multi-component suites compare component-qualified names, and which
+        # elements are free differs per suite.
+        for p in case.settings.tied():
             a, b = isis.tied.get(p), gael.tied.get(p)
             if usable(a, b):
                 out.samples.append(Sample(case.case_id, p, b.value, a.value))
 
         for idx, (ai, bi) in enumerate(zip(isis.per_spectrum, gael.per_spectrum)):
-            for p in UNTIED_PARAMS:
+            for p in case.settings.untied():
                 a, b = ai.get(p), bi.get(p)
                 if usable(a, b):
                     label = (
@@ -145,9 +148,18 @@ def nmad(x: np.ndarray) -> float:
     return float(1.4826 * np.median(np.abs(x - np.median(x))))
 
 
+def _params_of(coll: Collection) -> list[str]:
+    """Parameters actually present, in a stable order (COMPARED_PARAMS first
+    so the legacy suites keep their familiar row order)."""
+    seen = {s.param for s in coll.samples}
+    head = [p for p in COMPARED_PARAMS if p in seen]
+    tail = sorted(p for p in seen if p not in set(COMPARED_PARAMS))
+    return head + tail
+
+
 def statistics(coll: Collection) -> dict:
     stats = {}
-    for p in COMPARED_PARAMS:
+    for p in _params_of(coll):
         d = coll.deltas(p)
         if d.size == 0:
             stats[p] = {"n": 0}
@@ -237,7 +249,8 @@ def check(suite: str, coll: Collection, stats: dict, tolerances: dict) -> tuple[
             continue
         if st.get("n", 0) == 0:
             continue
-        unit = UNITS.get(p, "")
+        from .jobs import split_qualified
+        unit = UNITS.get(p, UNITS.get(split_qualified(p)[1], ""))
         if abs(st["bias"]) > limits["max_abs_bias"]:
             problems.append(
                 f"{p}: bias {st['bias']:+.4g} {unit} exceeds "
@@ -272,11 +285,17 @@ THRESHOLD_FLOORS = {
 def calibrate(suite: str, coll: Collection, stats: dict, margin: float = 2.0) -> dict:
     """Derive thresholds from an observed run, with head-room."""
     params = {}
-    for p in COMPARED_PARAMS:
+    for p in _params_of(coll):
         st = stats.get(p, {})
         if not st.get("n"):
             continue
-        bias_floor, scatter_floor = THRESHOLD_FLOORS.get(p, (0.0, 0.0))
+        # Floors are keyed by the bare parameter name, so a qualified one
+        # ("c2_teff") inherits the floor of its kind; an element abundance is
+        # a dex quantity and reuses the "he" floor.
+        from .jobs import split_qualified
+        _, bare = split_qualified(p)
+        bias_floor, scatter_floor = THRESHOLD_FLOORS.get(
+            bare, THRESHOLD_FLOORS.get("he", (0.0, 0.0)))
         params[p] = {
             "min_n": int(max(1, 0.6 * st["n"])),
             "max_abs_bias": _round(
@@ -338,7 +357,7 @@ def report(suite: str, coll: Collection, stats: dict, truth: dict | None = None)
     header = f"{'param':>6} {'n':>5} {'bias':>12} {'scatter':>12} {'max|d|':>12} {'outliers':>9}"
     lines.append(header)
     lines.append("-" * len(header))
-    for p in COMPARED_PARAMS:
+    for p in _params_of(coll):
         st = stats.get(p, {})
         if not st.get("n"):
             lines.append(f"{p:>6} {0:>5}   (no comparable values)")

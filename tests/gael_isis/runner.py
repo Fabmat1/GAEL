@@ -191,11 +191,24 @@ def execute(
 
         if args.calibrate:
             spec = compare.calibrate(name, coll, stats)
-            compare.write_tolerances(name, spec)
-            reports.append(
-                f"[calibrate] wrote tolerances for {name} to "
-                f"{compare.TOLERANCE_FILE}"
-            )
+            #  A run where nothing was comparable calibrates to
+            #  {"min_clean_cases": 0, "parameters": {}} -- a suite entry that
+            #  exists, and therefore stops compare.check() from saying "no
+            #  calibrated tolerances, reporting only", while gating on nothing
+            #  at all.  Refusing to write it keeps the honest state.
+            if not spec["parameters"]:
+                reports.append(
+                    f"[calibrate] NOT writing tolerances for {name}: no case "
+                    f"produced a comparable parameter, so there is nothing to "
+                    f"calibrate.  The suite stays uncalibrated (reporting "
+                    f"only) rather than gaining a gate that always passes."
+                )
+            else:
+                compare.write_tolerances(name, spec)
+                reports.append(
+                    f"[calibrate] wrote tolerances for {name} to "
+                    f"{compare.TOLERANCE_FILE}"
+                )
         elif args.limit:
             # The thresholds are calibrated for the full suite; a truncated run
             # cannot satisfy their sample-size floors, so report without gating.

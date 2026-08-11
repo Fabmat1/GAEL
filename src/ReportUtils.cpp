@@ -252,10 +252,11 @@ void generate_results(const std::string&              out_dir,
                             sl.str() + "$\\\\");
     }
     
-    /* --- now all stellar parameters ----------------------------------- */
-    constexpr int NP = ParameterIndexer::kNStellarParams;
-    const char* tags[NP] = {"vrad","vsini","zeta","teff",
-                            "logg","xi","z","he","sur_ratio"};
+    /* --- now all stellar parameters -----------------------------------
+     *  Driven by the workflow's parameter table, so a grid that resolves
+     *  element abundances reports them without a change here; latex_name()
+     *  falls back to the bare tag for anything it has no caption for.      */
+    const auto& indexer = wf.get_indexer();
     const int   n_comp  = model.params.size();
     const int   n_spec  = datasets.size();
     
@@ -268,9 +269,9 @@ void generate_results(const std::string&              out_dir,
     
     for (int c = 0; c < n_comp; ++c)
     {
-        for (int k = 0; k < NP; ++k)
+        for (const auto& ps : indexer.params(c))
         {
-            const std::string tag = tags[k];
+            const std::string tag = ps.name;
             const bool untied = is_untied(tag);
     
             const int   n_iter = untied ? n_spec : 1;

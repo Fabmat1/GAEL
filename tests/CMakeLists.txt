@@ -22,6 +22,7 @@ set(GAEL_TEST_ASTRA_DB "" CACHE FILEPATH
 set(_gael_test_env
     "GAEL_TEST_GAEL_BIN=$<TARGET_FILE:GAEL>"
     "GAEL_TEST_MOCKGEN_BIN=$<TARGET_FILE:mock_data_generator>"
+    "GAEL_TEST_XSHOOTER_GEN=$<TARGET_FILE:gen_mock_xshooter>"
     "GAEL_TEST_GLOBAL_SETTINGS=${CMAKE_BINARY_DIR}/global_settings.json"
     "GAEL_TEST_CACHE=${GAEL_TEST_CACHE_DIR}"
 )
@@ -46,6 +47,11 @@ endfunction()
 
 gael_add_comparison_test(gael_vs_isis_mock test_mock_vs_isis.py)
 gael_add_comparison_test(gael_vs_isis_real test_real_vs_isis.py)
+
+# Element abundances and multi-component fits.  These need a metal-bearing
+# grid (the Feros ones), which the sdB suites above do not have, so they skip
+# cleanly on a machine that only has sdB/processed.
+gael_add_comparison_test(gael_vs_isis_xshooter test_xshooter_vs_isis.py)
 
 # A fast subset for "did I break the harness itself" checks.
 add_test(NAME gael_vs_isis_smoke
