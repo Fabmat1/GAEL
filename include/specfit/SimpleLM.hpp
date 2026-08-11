@@ -5,7 +5,10 @@
 #include <iostream>
 #include <iomanip>
 #include <limits>
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 
 namespace specfit {
 
@@ -34,6 +37,28 @@ namespace specfit {
  *  zero).  A column that is identically zero means the parameter cannot move
  *  the model at all; it is treated as converged rather than as a blocker.
  */
+/*
+ *  Structural sparsity of the Jacobian, if the caller knows it.
+ *
+ *  In a joint fit of D spectra the continuum anchors of spectrum d can only
+ *  move that spectrum's residuals: their Jacobian columns are identically
+ *  zero everywhere else.  Forming JᵀJ as one dense product spends almost all
+ *  of its time multiplying those zeros -- 57 MFLOP per iteration on a
+ *  5-spectrum fit, against 6 MFLOP for the blocks that can be non-zero.
+ *
+ *  Each block claims a half-open range of parameters (in the *full* parameter
+ *  numbering) and the half-open range of residual rows outside which every
+ *  one of those columns vanishes.  Blocks must be disjoint, ascending and
+ *  cover every parameter; leaving the vector empty keeps the dense product.
+ *
+ *  GAEL_LM_CHECK_BLOCKS=1 recomputes JᵀJ densely and reports the largest
+ *  disagreement, which is what a wrong block declaration looks like.
+ */
+struct LMColumnBlock {
+    int col_begin, col_end;      // parameters   [begin, end)
+    int row_begin, row_end;      // residual rows[begin, end)
+};
+
 struct LMSolverOptions {
     int    max_iterations        = 200;      // hard upper limit
     double gradient_tolerance    = 0;        // auto
@@ -42,6 +67,7 @@ struct LMSolverOptions {
     double initial_lambda        = 0;        // auto
     int    max_consecutive_rejects = 12;     // give up when LM cannot progress
     bool   verbose               = false;    // chatty?
+    std::vector<LMColumnBlock> column_blocks;   // empty == dense JᵀJ
 };
 
 /*  Defaults for the scaled tolerances above.  They are dimensionless, so --
@@ -77,10 +103,103 @@ void build_free_index(const std::vector<bool>& mask,
     }
 }
 
+/*  A column block translated into the reduced (free-parameters-only)
+ *  numbering that the normal equations actually use.                        */
+struct LMReducedBlock { int col, ncol, row, nrow; };
+
+inline std::vector<LMReducedBlock>
+reduce_column_blocks(const std::vector<LMColumnBlock>& blocks,
+                     const Eigen::VectorXi&            col_index,
+                     int                               n_free,
+                     std::ptrdiff_t                    m)
+{
+    std::vector<LMReducedBlock> out;
+    if (blocks.empty()) return out;
+
+    int covered = 0;
+    for (const auto& b : blocks) {
+        int first = -1, count = 0;
+        for (int j = b.col_begin; j < b.col_end; ++j) {
+            if (j < 0 || j >= col_index.size()) continue;
+            const int c = col_index[j];
+            if (c < 0) continue;
+            if (first < 0) first = c;
+            ++count;
+        }
+        if (count == 0) continue;
+        /*  The reduced numbering keeps the original order, so the free
+         *  columns of a block stay contiguous.  If that ever stops being
+         *  true the declaration is unusable -- fall back to dense.          */
+        if (first + count > n_free) return {};
+        const int r0 = std::max(0, b.row_begin);
+        const int r1 = std::min<int>(static_cast<int>(m), b.row_end);
+        if (r1 <= r0) return {};
+        out.push_back({first, count, r0, r1 - r0});
+        covered += count;
+    }
+    if (covered != n_free) return {};      // incomplete cover: not usable
+
+    /*  Every block reaching every row means there is no structure to exploit
+     *  -- a single spectrum, typically.  Splitting the product up would then
+     *  only trade one rank update for several smaller ones.                 */
+    bool any_restricted = false;
+    for (const auto& b : out)
+        if (b.row != 0 || b.nrow != static_cast<int>(m)) any_restricted = true;
+    if (!any_restricted) return {};
+
+    return out;
+}
+
+/*  g = Jfᵀ r and JTJ = JfᵀJf, skipping the structurally-zero blocks.        */
+inline void normal_equations(const Eigen::MatrixXd&             Jf,
+                             const Eigen::VectorXd&             r,
+                             const std::vector<LMReducedBlock>& blocks,
+                             Eigen::MatrixXd&                   JTJ,
+                             Eigen::VectorXd&                   g)
+{
+    JTJ.setZero();
+
+    if (blocks.empty()) {                  // dense: original behaviour
+        g.noalias() = Jf.transpose() * r;
+        JTJ.selfadjointView<Eigen::Lower>().rankUpdate(Jf.adjoint(), 1.0);
+        JTJ.template triangularView<Eigen::StrictlyUpper>() = JTJ.transpose();
+        return;
+    }
+
+    for (const auto& b : blocks)
+        g.segment(b.col, b.ncol).noalias() =
+            Jf.block(b.row, b.col, b.nrow, b.ncol).transpose()
+                * r.segment(b.row, b.nrow);
+
+    /*  Plain products throughout, including on the diagonal blocks.  A rank
+     *  update would halve their arithmetic, but Eigen cannot route one into
+     *  a Block destination through the BLAS back-end and the generic fallback
+     *  measured slower than just doing the full product (1.63 s vs 1.35 s on
+     *  a 5-spectrum fit).                                                    */
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        for (std::size_t j = 0; j <= i; ++j) {
+            const auto& bi = blocks[i];
+            const auto& bj = blocks[j];
+            const int r0 = std::max(bi.row, bj.row);
+            const int r1 = std::min(bi.row + bi.nrow, bj.row + bj.nrow);
+            if (r1 <= r0) continue;        // no shared rows: block is zero
+
+            /* blocks are ascending in column, so this lands strictly below
+               the diagonal and the symmetrise below fills its mirror */
+            JTJ.block(bi.col, bj.col, bi.ncol, bj.ncol).noalias() =
+                Jf.block(r0, bi.col, r1 - r0, bi.ncol).transpose()
+                    * Jf.block(r0, bj.col, r1 - r0, bj.ncol);
+        }
+    }
+
+    JTJ.template triangularView<Eigen::StrictlyUpper>() = JTJ.transpose();
+}
+
 struct LMWorkspace
 {
     Eigen::MatrixXd Jf;
     Eigen::MatrixXd JTJ;
+    Eigen::MatrixXd JTJ0;      // undamped, reused while the Jacobian stands
     Eigen::VectorXd diag_JTJ;
     Eigen::VectorXd g;
     Eigen::VectorXd dx_free;
@@ -97,6 +216,8 @@ struct LMWorkspace
 
         if (JTJ.rows() < n_free || JTJ.cols() < n_free)
             JTJ.resize (n_free, n_free);            // square, so grow once
+        if (JTJ0.rows() < n_free || JTJ0.cols() < n_free)
+            JTJ0.resize(n_free, n_free);
 
         if (diag_JTJ.size() < n_free) diag_JTJ.resize(n_free);
         if (g.size()        < n_free) g.resize       (n_free);
@@ -105,8 +226,9 @@ struct LMWorkspace
 
         /* … and then shrink logically to the exact size that is
            required for the *current* problem instance (no re-alloc): */
-        Jf.conservativeResize (m, n_free);
-        JTJ.conservativeResize(n_free, n_free);
+        Jf.conservativeResize  (m, n_free);
+        JTJ.conservativeResize (n_free, n_free);
+        JTJ0.conservativeResize(n_free, n_free);
         diag_JTJ.conservativeResize(n_free);
         g.conservativeResize       (n_free);
         dx_free.conservativeResize (n_free);
@@ -194,12 +316,13 @@ levenberg_marquardt(Functor&&                    func,
     /* --------------------------------------------------------------- */
     /*  one-time allocations                                           */
     /* --------------------------------------------------------------- */
-    Eigen::MatrixXd Jf_local, JTJ_local;
+    Eigen::MatrixXd Jf_local, JTJ_local, JTJ0_local;
     Eigen::VectorXd diag_local, g_local, dx_free_local, dx_local;
 
     /* pick the storage that will actually be used */
     Eigen::MatrixXd &Jf        = work ? work->Jf        : Jf_local;
     Eigen::MatrixXd &JTJ       = work ? work->JTJ       : JTJ_local;
+    Eigen::MatrixXd &JTJ0      = work ? work->JTJ0      : JTJ0_local;
     Eigen::VectorXd &diag_JTJ  = work ? work->diag_JTJ  : diag_local;
     Eigen::VectorXd &g         = work ? work->g         : g_local;
     Eigen::VectorXd &dx_free   = work ? work->dx_free   : dx_free_local;
@@ -208,8 +331,9 @@ levenberg_marquardt(Functor&&                    func,
     /* make sure the arrays are big enough (may allocate once) */
     if (work) work->resize(m, n_free, n);
     else {                 // original behaviour
-        Jf.resize (m, n_free);
-        JTJ.resize(n_free, n_free);
+        Jf.resize  (m, n_free);
+        JTJ.resize (n_free, n_free);
+        JTJ0.resize(n_free, n_free);
         diag_JTJ.resize(n_free);
         g.resize(n_free);
         dx_free.resize(n_free);
@@ -221,7 +345,23 @@ levenberg_marquardt(Functor&&                    func,
         std::cout << "[LM]  Entering iteration loop..." << std::endl;
     }
 
+    /*  Structural sparsity, if the caller declared any (see LMColumnBlock). */
+    const std::vector<LMReducedBlock> blocks =
+        reduce_column_blocks(opt.column_blocks, col_index, n_free,
+                             static_cast<std::ptrdiff_t>(m));
+    const bool check_blocks = [] {
+        const char* e = std::getenv("GAEL_LM_CHECK_BLOCKS");
+        return e && *e && std::string(e) != "0";
+    }();
+
     int consecutive_rejects = 0;
+
+    /*  A rejected step leaves J and r exactly as they were, so JᵀJ and Jᵀr
+     *  come out identical and only the damping changes.  Rebuilding them
+     *  anyway was the single most expensive thing the solver did once the
+     *  cost function had been sped up (57 MFLOP per iteration on a
+     *  5-spectrum fit, half of them for steps that were thrown away).      */
+    bool jacobian_is_stale = true;
 
     /* --------------------------------------------------------------- */
     /*  main iteration loop                                            */
@@ -229,28 +369,36 @@ levenberg_marquardt(Functor&&                    func,
     for (int it = 0; it < opt.max_iterations; ++it) {
         summ.iterations = it + 1;
 
-        if (opt.verbose)
-            std::cout << "[LM] Building Reduced Jacobian." << std::endl;
+        if (jacobian_is_stale) {
+            if (opt.verbose)
+                std::cout << "[LM] Building Reduced Jacobian." << std::endl;
 
-        /* ----- build reduced Jacobian (copy only the free columns) -- */
-        for (int j = 0; j < n; ++j) {
-            int col = col_index[j];
-            if (col >= 0) Jf.col(col).noalias() = J.col(j);
+            /* ----- build reduced Jacobian (copy only the free columns) -- */
+            for (int j = 0; j < n; ++j) {
+                int col = col_index[j];
+                if (col >= 0) Jf.col(col).noalias() = J.col(j);
+            }
+
+            if (opt.verbose)
+                std::cout << "[LM] Built Reduced Jacobian. Transposing." << std::endl;
+
+            /* --------------- g = Jᵀ r  and  JTJ0 = JᵀJ ----------------- */
+            normal_equations(Jf, r, blocks, JTJ0, g);
+
+            if (check_blocks && !blocks.empty()) {
+                Eigen::MatrixXd JTJ_dense(n_free, n_free);
+                Eigen::VectorXd g_dense(n_free);
+                normal_equations(Jf, r, {}, JTJ_dense, g_dense);
+                std::cout << "[LM] block check: max|dJTJ| = "
+                          << (JTJ_dense - JTJ0).cwiseAbs().maxCoeff()
+                          << "  max|dg| = "
+                          << (g_dense - g).cwiseAbs().maxCoeff() << '\n';
+            }
+
+            diag_JTJ = JTJ0.diagonal();
+
+            jacobian_is_stale = false;
         }
-
-        if (opt.verbose)
-            std::cout << "[LM] Built Reduced Jacobian. Transposing." << std::endl;
-
-        /* ---------------------- g = Jᵀ r --------------------------- */
-        g.noalias() = Jf.transpose() * r;
-
-        /* ---------- JTJ = JᵀJ  (use rank-update, lower triangle) ---- */
-        JTJ.setZero();
-        JTJ.selfadjointView<Eigen::Lower>().rankUpdate(Jf.adjoint(), 1.0);
-        JTJ.template triangularView<Eigen::StrictlyUpper>() =
-            JTJ.transpose();                       // copy to upper
-
-        diag_JTJ = JTJ.diagonal();
 
         /* --------- per-parameter gradient test (see header) --------- *
          *  |g_j| / (sqrt(JᵀJ_jj) ||r||) is the cosine of the angle between
@@ -278,6 +426,7 @@ levenberg_marquardt(Functor&&                    func,
             std::cout << "[LM] Multiplied Matrices. Diagonalizing and solving." << std::endl;
 
         /* ------- (JTJ + λ D) Δx = −g   (D = diag(JTJ)) -------------- */
+        JTJ = JTJ0;                                // damp a copy, keep JᵀJ
         JTJ.diagonal().array() +=
             lambda * (diag_JTJ.array() + 1e-20);   // Fletcher scaling
 
@@ -336,11 +485,17 @@ levenberg_marquardt(Functor&&                    func,
             if (col >= 0) dx_free[col] = dx_actual[j];
         }
 
+        /*  Residuals only.  Roughly half of all LM steps are rejected (measured:
+         *  482 of 930 on a 5-spectrum joint fit), and a rejected step's Jacobian
+         *  is discarded unread -- it used to be computed anyway, at ~14 residual
+         *  evaluations plus a continuum spline per anchor.  The Jacobian is now
+         *  built only once the step is known to be kept, which costs one extra
+         *  residual evaluation per accepted step and saves a whole Jacobian per
+         *  rejected one.  Every value below is unchanged.                      */
         Eigen::VectorXd r_try;
-        Eigen::MatrixXd J_try;
         if (opt.verbose)
             std::cout << "[LM] Function Evaluation" << std::endl;
-        func(x_try, &r_try, &J_try);
+        func(x_try, &r_try, nullptr);
         if (opt.verbose)
             std::cout << "[LM] Evaluation done." << std::endl;
         double chi2_try = r_try.squaredNorm();
@@ -360,9 +515,13 @@ levenberg_marquardt(Functor&&                    func,
             /* --------------- successful iteration ------------------ */
             x.swap(x_try);
             r.swap(r_try);
-            J.swap(J_try);
             chi2 = chi2_try;
             consecutive_rejects = 0;
+
+            /*  Jacobian at the point we just moved to: needed by the next
+             *  iteration, and by the uncertainty block if this is the last.  */
+            func(x, nullptr, &J);
+            jacobian_is_stale = true;
 
             /* adaptive λ (MINPACK style) ---------------------------- */
             double fac = std::max(1.0/3.0,
@@ -414,10 +573,7 @@ levenberg_marquardt(Functor&&                    func,
             int col = col_index[j];
             if (col >= 0) Jf.col(col).noalias() = J.col(j);
         }
-        JTJ.setZero();
-        JTJ.selfadjointView<Eigen::Lower>().rankUpdate(Jf.adjoint(), 1.0);
-        JTJ.template triangularView<Eigen::StrictlyUpper>() =
-            JTJ.transpose();
+        normal_equations(Jf, r, blocks, JTJ, g);
 
         const double dof = std::max<std::size_t>(m - n_free, 1);
         const double var = r.squaredNorm() / dof;             // σ² ≈ χ²/dof

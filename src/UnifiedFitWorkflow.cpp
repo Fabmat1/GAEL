@@ -288,6 +288,30 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
         }
     }
 
+    /*  Tell the cost function which columns will actually be read: LM only
+     *  ever assembles the free ones, so a frozen parameter's finite
+     *  difference is thrown away.  In the continuum-only stage that is every
+     *  stellar parameter -- twelve full residual evaluations per Jacobian on
+     *  a five-spectrum fit, for nothing.                                    */
+    cost.set_free_mask(free_mask);
+
+    /*  Structural sparsity of the Jacobian: a stellar parameter reaches every
+     *  residual, but a continuum anchor of spectrum d reaches only spectrum
+     *  d's rows.  Telling LM so turns one dense JᵀJ into a handful of small
+     *  blocks -- ~10x fewer multiplications on a five-spectrum joint fit,
+     *  where the anchors are 107 of the 115 free parameters.                */
+    std::vector<LMColumnBlock> col_blocks;
+    {
+        const auto& roff = cost.row_offsets();
+        const auto& rcnt = cost.row_counts();
+        col_blocks.push_back({0, stellar_total, 0, total_residuals});
+        for (std::size_t d = 0; d < datasets_.size(); ++d) {
+            const int cb = stellar_total + ds_infos[d].cont_param_offset;
+            col_blocks.push_back({cb, cb + ds_infos[d].cont_param_count,
+                                  roff[d], roff[d] + rcnt[d]});
+        }
+    }
+
     /* ---- d)   run Levenberg–Marquardt -------------------------------- */
     Eigen::VectorXd x = Eigen::Map<Eigen::VectorXd>(unified_params_.data(), Npar);
     
@@ -299,6 +323,7 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
     LMSolverOptions lm_opt;
     lm_opt.max_iterations = max_iterations;
     lm_opt.verbose        = false;
+    lm_opt.column_blocks  = std::move(col_blocks);
     
     // Create a wrapper functor for the cost function
     auto cost_functor = [&cost](const Eigen::VectorXd& p,

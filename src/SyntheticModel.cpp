@@ -91,11 +91,11 @@ inline std::size_t make_hash_surface(const StellarParams& p,
 /* ------------------------------------------------------------------ *
  *                         main routine                               *
  * ------------------------------------------------------------------ */
-Spectrum compute_synthetic(const ModelGrid&    grid,
-                           const StellarParams& pars,
-                           const Vector&        lambda_obs,
-                           double               resOffset,
-                           double               resSlope)
+SpectrumPtr compute_synthetic_cached(const ModelGrid&    grid,
+                                     const StellarParams& pars,
+                                     const Vector&        lambda_obs,
+                                     double               resOffset,
+                                     double               resSlope)
 {
     //std::cout << "[CompSynth] Entering Function" << std::endl;  
     //std::cout << "[CompSynth] Making Hash." << std::endl;               
@@ -151,8 +151,17 @@ Spectrum compute_synthetic(const ModelGrid&    grid,
             return out;    // moved into cache (as shared_ptr target)
         });
 
-    /* Return a copy (keeps legacy API) */
-    return *final_sp;
+    return final_sp;
+}
+
+Spectrum compute_synthetic(const ModelGrid&    grid,
+                           const StellarParams& pars,
+                           const Vector&        lambda_obs,
+                           double               resOffset,
+                           double               resSlope)
+{
+    return *compute_synthetic_cached(grid, pars, lambda_obs,
+                                     resOffset, resSlope);
 }
 
 /* ------------------------------------------------------------------ *

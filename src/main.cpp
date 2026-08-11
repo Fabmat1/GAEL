@@ -4,6 +4,7 @@
 #include "specfit/SpectrumCache.hpp"
 #include "specfit/SyntheticModel.hpp"
 #include "specfit/UnifiedFitWorkflow.hpp"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -176,14 +177,43 @@ int main(int argc, char **argv) {
             "threads", "Number of threads",
             cxxopts::value<int>()->default_value("0"))(
             "output-synthetic", "Only write undegraded synthetic spectra")(
-            /*  100 was suspected of thrashing (one Jacobian of a 5-spectrum
-                fit touches ~90 distinct SpectrumCache keys), so it was
-                measured: with the model grid sliced to the fit window a
-                5-spectrum fit takes 4.49 s at 100 entries, 4.34 s at 512 and
-                4.39 s at 2048 -- no difference beyond run-to-run noise.
-                Leave it at 100 rather than spend the memory.               */
-            "cache-size", "Cache entries",
-            cxxopts::value<int>()->default_value("100"))(
+            /*  The old fixed default of 100 entries was thrashing badly once
+                the continuum-jitter ensemble is on: a 5-spectrum joint fit
+                walks through far more than 100 distinct corner spectra, and
+                every eviction costs a FITS read plus a rotational and an
+                instrumental convolution.  Measured on a real 5-spectrum case,
+                bit-identical output throughout:
+
+                    100 entries  22.1 s   120 MB RSS
+                    200 entries  10.0 s   142 MB RSS
+                    500 entries  10.1 s   179 MB RSS
+                   2000 entries  10.2 s   319 MB RSS
+
+                An entry count is the wrong knob, though: entries range from
+                ~40 kB (a synthetic spectrum on the observed grid) to ~490 kB
+                (an unsliced model surface spectrum), and both scale with the
+                fit window.  The default is therefore a memory budget; 0 here
+                means "no entry cap, let the budget decide".
+
+                On the budget: once the solver stopped re-deriving residuals it
+                did not need, the working set collapsed and the cache stopped
+                being the bottleneck.  Same 5-spectrum case, bit-identical
+                output at every setting:
+
+                      8 MiB   1.09 s    94 MB RSS
+                     32 MiB   1.13 s   118 MB
+                    128 MiB   1.14 s   219 MB
+                    512 MiB   1.22 s   601 MB
+
+                Bigger is now mildly *worse* -- more allocator and hash
+                pressure for spectra that are never asked for again.  128 MiB
+                is several times the largest working set measured while still
+                leaving room for a wider wavelength window or more spectra,
+                and it sits below what the old 100-entry default peaked at.   */
+            "cache-size", "Cache entry cap (0 = use --cache-mem only)",
+            cxxopts::value<int>()->default_value("0"))(
+            "cache-mem", "Model-spectrum cache budget in MiB",
+            cxxopts::value<int>()->default_value("128"))(
             "debug-plots", "Write per-stage debug plots")(
             "no-plots", "Skip per-spectrum summary plots")(
             "cont-jitter",
@@ -198,7 +228,11 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        SpectrumCache::instance().set_capacity(cli["cache-size"].as<int>());
+        SpectrumCache::instance().set_capacity(
+            std::max(0, cli["cache-size"].as<int>()));
+        SpectrumCache::instance().set_memory_budget(
+            static_cast<std::size_t>(std::max(1, cli["cache-mem"].as<int>()))
+                << 20);
 
         auto gs = api::global_settings_from_json_file(find_global_settings());
         auto fi = api::fit_input_from_json_file(cli["fit"].as<std::string>());

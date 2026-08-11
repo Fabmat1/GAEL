@@ -5,6 +5,7 @@
 #include <vector>
 #include <tuple>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <cstdlib>
 #include <string>
@@ -60,8 +61,14 @@ struct CacheKeyHash {
     }
 };
 
+/*  Weights are handed out as a shared_ptr, not as a reference into the map:
+ *  corner spectra are convolved from several OpenMP threads at once, and a
+ *  concurrent eviction would otherwise pull the vector out from under a
+ *  thread that was still summing over it.                                   */
+using WeightsPtr = std::shared_ptr<const std::vector<WeightSegment>>;
+
 // Global cache (thread-safe for reads after initial computation)
-static std::unordered_map<CacheKey, std::vector<WeightSegment>, CacheKeyHash> g_weightCache;
+static std::unordered_map<CacheKey, WeightsPtr, CacheKeyHash> g_weightCache;
 static std::list<CacheKey> g_lruList;
 static std::mutex g_cacheMutex;
 static constexpr std::size_t MAX_CACHE_SIZE = 25;
@@ -74,15 +81,25 @@ static void touch_key(const CacheKey& key) {
 }
 
 // Inserts key and evicts if needed
-static void insert_cache_entry(const CacheKey& key, std::vector<WeightSegment>&& value) {
-    g_weightCache.emplace(key, std::move(value));
+static WeightsPtr insert_cache_entry(const CacheKey& key,
+                                     std::vector<WeightSegment>&& value) {
+    /*  Two threads can race to compute the same weights; keep the first set
+     *  rather than adding a second LRU entry for the same key.              */
+    if (auto it = g_weightCache.find(key); it != g_weightCache.end()) {
+        touch_key(key);
+        return it->second;
+    }
+
+    auto ptr = std::make_shared<const std::vector<WeightSegment>>(std::move(value));
+    g_weightCache[key] = ptr;
     g_lruList.push_front(key);
-    
+
     if (g_weightCache.size() > MAX_CACHE_SIZE) {
-        const CacheKey& victim = g_lruList.back();
+        const CacheKey victim = g_lruList.back();
         g_weightCache.erase(victim);
         g_lruList.pop_back();
     }
+    return ptr;
 }
 
 
@@ -257,6 +274,25 @@ static Vector degrade_resolution_isis(const Vector& lam,
     return out;
 }
 
+#ifdef GAEL_USE_CUDA
+/*  The GPU kernel is algorithmically identical to the CPU one but recomputes
+ *  the Gaussian weights on every call and pays a full device synchronise per
+ *  corner spectrum, while the CPU path caches the weights and then only does
+ *  a ~1 MFLOP sparse mat-vec.  Measured on a 5-spectrum joint fit, the CPU
+ *  path won every configuration tried -- by 35 % when the spectrum cache was
+ *  thrashing and by a few per cent once it was not -- and CUDA context setup
+ *  costs another ~0.5 s per process, which is what a whole single-spectrum
+ *  fit takes.  The back-end is still built; GAEL_GPU=1 selects it.          */
+static bool use_gpu_convolution()
+{
+    static const bool v = [] {
+        const char* e = std::getenv("GAEL_GPU");
+        return e && *e && std::string(e) != "0";
+    }();
+    return v;
+}
+#endif
+
 // Main resolution degradation function with caching
 Vector degrade_resolution(const Vector& lam,
                          const Vector& flux,
@@ -269,34 +305,38 @@ Vector degrade_resolution(const Vector& lam,
             return degrade_resolution_isis(lam, flux, resOffset, resSlope);
     }
 #ifdef GAEL_USE_CUDA
-    return degrade_resolution_cuda(lam, flux, resOffset, resSlope);
-#else
+    if (use_gpu_convolution())
+        return degrade_resolution_cuda(lam, flux, resOffset, resSlope);
+#endif
     // Create cache key
     CacheKey key = make_cache_key(lam, resOffset, resSlope);
     
     // Check if weights are cached
     {
-        std::lock_guard<std::mutex> lock(g_cacheMutex);
-        auto it = g_weightCache.find(key);
-        if (it != g_weightCache.end()) {
-            touch_key(key);
-            return apply_weights(flux, it->second);
+        WeightsPtr hit;
+        {
+            std::lock_guard<std::mutex> lock(g_cacheMutex);
+            auto it = g_weightCache.find(key);
+            if (it != g_weightCache.end()) {
+                hit = it->second;           // keep alive past the lock
+                touch_key(key);
+            }
         }
+        if (hit) return apply_weights(flux, *hit);
     }
-    
+
     // Compute weights
     auto weights = compute_weights(lam, resOffset, resSlope);
 
     // Insert into cache with LRU enforcement
+    WeightsPtr w;
     {
         std::lock_guard<std::mutex> lock(g_cacheMutex);
-        insert_cache_entry(key, std::move(weights));
+        w = insert_cache_entry(key, std::move(weights));
     }
 
     // Apply weights
-    return apply_weights(flux, g_weightCache[key]);
-
-#endif
+    return apply_weights(flux, *w);
 }
 
 // Optional: Function to precompute weights for known grids
@@ -305,7 +345,7 @@ void precompute_weights(const Vector& lam, double resOffset, double resSlope) {
     
     std::lock_guard<std::mutex> lock(g_cacheMutex);
     if (g_weightCache.find(key) == g_weightCache.end()) {
-        g_weightCache[key] = compute_weights(lam, resOffset, resSlope);
+        insert_cache_entry(key, compute_weights(lam, resOffset, resSlope));
     }
 }
 

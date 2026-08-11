@@ -50,8 +50,24 @@ public:
 
     /* ------------ house-keeping ------------------------------------ */
     void reserve(std::size_t n);
+
+    /*  Hard cap on the number of entries.  0 restores the automatic mode,
+     *  in which only the memory budget below decides when to evict.       */
     void set_capacity(std::size_t n);
+
+    /*  Cap on the bytes held by the cached spectra.  Entries differ in size
+     *  by more than an order of magnitude -- a sliced model surface spectrum
+     *  is ~10 000 points, a final synthetic one only as long as the observed
+     *  grid -- so a fixed entry count is either wasteful or far too small
+     *  depending on the fit.  Budgeting bytes makes one default correct for
+     *  both.                                                               */
+    void set_memory_budget(std::size_t bytes);
+
     void clear();
+
+    /* ------------ diagnostics -------------------------------------- */
+    std::size_t size()       const;   // entries currently held
+    std::size_t bytes_used() const;
 
 private:
     SpectrumCache() = default;
@@ -61,8 +77,11 @@ private:
     struct Node {
         SpectrumPtr       sp;       // shared ownership
         LruList::iterator lru_pos;  // position in the list
+        std::size_t       bytes;    // footprint of *sp when it was inserted
     };
     using Map = ankerl::unordered_dense::map<std::size_t, Node>;
+
+    static std::size_t footprint_(const Spectrum& s);
 
     void touch_(typename Map::iterator it) const;   // header
     void evict_if_needed_();
@@ -71,7 +90,9 @@ private:
     mutable std::shared_mutex mtx_;
     mutable Map     cache_;
     mutable LruList lru_;
-    std::size_t     max_entries_ = 2'048;
+    std::size_t     bytes_       = 0;
+    std::size_t     max_entries_ = 0;              // 0 == no entry cap
+    std::size_t     max_bytes_   = 128ull << 20;   // see --cache-mem in main.cpp
 };
 
 /* ===================================================================== *
@@ -104,7 +125,9 @@ SpectrumPtr SpectrumCache::insert_if_absent(std::size_t hash,
     }
 
     auto lru_it = lru_.insert(lru_.begin(), hash);          // MRU front
-    cache_.try_emplace(hash, Node{new_sp, lru_it});
+    const std::size_t nbytes = footprint_(*new_sp);
+    cache_.try_emplace(hash, Node{new_sp, lru_it, nbytes});
+    bytes_ += nbytes;
     evict_if_needed_();
     return new_sp;
 }
