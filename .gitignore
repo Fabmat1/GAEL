@@ -1,5 +1,4 @@
-build
-build-debug
+build*/
 *.patch
 testspec.txt
 perf*
@@ -10,4 +9,3 @@ input/*
 XSHOOTER_mock.json
 *.log
 analyze_gael_results.py
-build_v0/

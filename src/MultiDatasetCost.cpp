@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <iostream>
 
+#ifdef _OPENMP
+#  include <omp.h>
+#endif
+
 namespace specfit {
 
 /* ------------------------------------------------------------------ *
@@ -235,7 +239,7 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
     //std::cout << "[CostFunc] Calculated residuals. Reserving Space" << std::endl; 
 
     if (!jacobians) return;                       // user wants resid only
-    jacobians->setZero(num_residuals_, n_total_params_);
+    jacobians->setZero(num_residuals_, jacobian_cols());
 
     const std::size_t nds = datasets_.size();
 
@@ -250,7 +254,14 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
     std::vector<Vector> all_cont (nds);
     std::vector<Vector> all_synth(nds);
     std::vector<Vector> all_tell (nds);
-    for (std::size_t d = 0; d < nds; ++d) {
+    /*  One spectrum's three factors are independent of every other's, and on a
+     *  joint fit of 18 arms this is 18 rebins plus 18 spline evaluations before
+     *  a single column is touched.  The model caches underneath are all
+     *  mutex-guarded (SpectrumCache, the convolution weight caches, the grids'
+     *  lazily-read wavelength arrays), so the only per-thread state is the
+     *  Vector each iteration writes to its own slot.                          */
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (std::ptrdiff_t d = 0; d < static_cast<std::ptrdiff_t>(nds); ++d) {
         all_cont [d] = continuum_of_dataset(parameters, d);
         all_synth[d] = synth_of_dataset    (parameters, d);
         all_tell [d] = telluric_of_dataset (parameters, d);
@@ -275,7 +286,27 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
      *  leaves every entry unchanged and cuts this block by ~3x.  The bound
      *  was checked numerically as well as derived: over 200 random knot
      *  layouts no difference ever appeared further than 3 intervals away.  */
+    /*  The anchors are flattened into one task list first: they are the bulk of
+     *  the columns (243 of 347 on an 18-arm fit) but individually the cheapest,
+     *  so a parallel loop over the two nested loops as written would hand whole
+     *  spectra to threads and leave most of them idle.  Each task writes only
+     *  its own column of `jacobians`, which is column-major, so no two threads
+     *  touch the same cache line except at column boundaries.                 */
+    struct AnchorTask { std::size_t ds_idx; int k; };
+    std::vector<AnchorTask> anchor_tasks;
     for (std::size_t ds_idx = 0; ds_idx < nds; ++ds_idx) {
+        const auto& ds = datasets_[ds_idx];
+        for (int k = 0; k < ds.cont_param_count; ++k)
+            if (is_free(base_cont_offset_ + ds.cont_param_offset + k))
+                anchor_tasks.push_back({ds_idx, k});
+    }
+
+    #pragma omp parallel for schedule(dynamic, 8)
+    for (std::ptrdiff_t t = 0;
+         t < static_cast<std::ptrdiff_t>(anchor_tasks.size()); ++t) {
+        const std::size_t ds_idx = anchor_tasks[t].ds_idx;
+        const int         k      = anchor_tasks[t].k;
+
         const auto&   ds        = datasets_[ds_idx];
         const int     na        = ds.cont_param_count;
         const int     nx        = static_cast<int>(ds.cont_x.size());
@@ -292,40 +323,38 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
 
         constexpr int kAnchorReach = 4;      // >= the 3 intervals of support
 
-        for (int k = 0; k < na; ++k) {
-            const int j_global = base_cont_offset_ + ds.cont_param_offset + k;
-            if (!is_free(j_global)) continue;      // column is never read
+        const int j_col = column_of(base_cont_offset_ + ds.cont_param_offset + k);
+        if (j_col < 0) continue;
 
-            /* pixel window this anchor can possibly change */
-            const int klo = k - kAnchorReach;
-            const int khi = k + kAnchorReach;
-            const Eigen::Index i0 =
-                (klo <= 0) ? 0
-                           : std::lower_bound(lam_b, lam_e, ds.cont_x[klo]) - lam_b;
-            const Eigen::Index i1 =
-                (khi >= nx - 1) ? ds.lambda.size()
-                                : std::upper_bound(lam_b, lam_e, ds.cont_x[khi]) - lam_b;
-            if (i1 <= i0) continue;          // nothing fitted in the window
+        /* pixel window this anchor can possibly change */
+        const int klo = k - kAnchorReach;
+        const int khi = k + kAnchorReach;
+        const Eigen::Index i0 =
+            (klo <= 0) ? 0
+                       : std::lower_bound(lam_b, lam_e, ds.cont_x[klo]) - lam_b;
+        const Eigen::Index i1 =
+            (khi >= nx - 1) ? ds.lambda.size()
+                            : std::upper_bound(lam_b, lam_e, ds.cont_x[khi]) - lam_b;
+        if (i1 <= i0) continue;          // nothing fitted in the window
 
-            Vector cy_eps = cont_y;
-            const double h = eps_base * (std::abs(cy_eps[k]) + 1.0);
-            cy_eps[k] += h;
+        Vector cy_eps = cont_y;
+        const double h = eps_base * (std::abs(cy_eps[k]) + 1.0);
+        cy_eps[k] += h;
 
-            const Vector lam_win  = ds.lambda.segment(i0, i1 - i0);
-            const Vector cont_eps = spline_continuum(ds.cont_x, cy_eps, lam_win);
+        const Vector lam_win  = ds.lambda.segment(i0, i1 - i0);
+        const Vector cont_eps = spline_continuum(ds.cont_x, cy_eps, lam_win);
 
-            const Vector& tell     = all_tell[ds_idx];
-            const bool    has_tell = tell.size() == ds.lambda.size();
+        const Vector& tell     = all_tell[ds_idx];
+        const bool    has_tell = tell.size() == ds.lambda.size();
 
-            for (Eigen::Index i = i0; i < i1; ++i) {
-                const int row = pix_row[static_cast<std::size_t>(i)];
-                if (row < 0) continue;       // pixel not fitted
+        for (Eigen::Index i = i0; i < i1; ++i) {
+            const int row = pix_row[static_cast<std::size_t>(i)];
+            if (row < 0) continue;       // pixel not fitted
 
-                double dmodel = synth[i] * (cont_eps[i - i0] - continuum[i]);
-                if (has_tell) dmodel *= tell[i];
-                jacobians->coeffRef(row, j_global) =
-                    dmodel / (h * ds.sigma[i]);
-            }
+            double dmodel = synth[i] * (cont_eps[i - i0] - continuum[i]);
+            if (has_tell) dmodel *= tell[i];
+            jacobians->coeffRef(row, j_col) =
+                dmodel / (h * ds.sigma[i]);
         }
     }
 
@@ -335,29 +364,48 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
      *  else and only that spectrum's rows have to be redone.  The synthetic
      *  spectrum and the continuum are untouched by them, so neither is
      *  recomputed.                                                          */
+    struct TellTask { std::size_t d; int k; };
+    std::vector<TellTask> tell_tasks;
     for (std::size_t d = 0; d < nds; ++d) {
         const auto& ds = datasets_[d];
         if (!ds.telluric || ds.telluric_param_offset < 0) continue;
+        if (row_count_[d] <= 0) continue;
+        for (int k = 0; k < kNTelluricParams; ++k)
+            if (is_free(ds.telluric_param_offset + k))
+                tell_tasks.push_back({d, k});
+    }
 
-        const Eigen::Index o = row_offset_[d];
-        const Eigen::Index n = row_count_ [d];
-        if (n <= 0) continue;
+    #pragma omp parallel
+    {
+        /*  Per-thread scratch, allocated once instead of per column.
+         *
+         *  It is deliberately *not* seeded from r0: rows_of_dataset writes
+         *  every row of the spectra it is given -- its keep-this-pixel test is
+         *  the same one row_of_pixel_ was built with -- and only those rows are
+         *  ever read back below.  The old `r_eps = r0` copied all 460 k
+         *  residuals per column to preserve rows nobody looks at.            */
+        Eigen::VectorXd p_eps(parameters.size());
+        Eigen::VectorXd r_eps(num_residuals_);
 
-        Eigen::VectorXd p_eps;
-        Eigen::VectorXd r_eps;
-        for (int k = 0; k < kNTelluricParams; ++k) {
-            const int j = ds.telluric_param_offset + k;
-            if (!is_free(j)) continue;
+        #pragma omp for schedule(dynamic, 1)
+        for (std::ptrdiff_t t = 0;
+             t < static_cast<std::ptrdiff_t>(tell_tasks.size()); ++t) {
+            const std::size_t d = tell_tasks[t].d;
+            const auto& ds = datasets_[d];
+            const Eigen::Index o = row_offset_[d];
+            const Eigen::Index n = row_count_ [d];
+            const int j     = ds.telluric_param_offset + tell_tasks[t].k;
+            const int j_col = column_of(j);
+            if (j_col < 0) continue;
 
             const double h = eps_base * (std::abs(parameters[j]) + 1.0);
             p_eps = parameters;
             p_eps[j] += h;
 
-            r_eps = r0;
             rows_of_dataset(d, all_synth[d], all_cont[d],
                             telluric_of_dataset(p_eps, d), r_eps);
 
-            jacobians->col(j).segment(o, n) =
+            jacobians->col(j_col).segment(o, n) =
                 (r_eps.segment(o, n) - r0.segment(o, n)) / h;
         }
     }
@@ -369,33 +417,54 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
      *  so restricting the difference to the spectra the parameter actually
      *  feeds changes no number and skips 4/5 of the work per vrad column
      *  on a five-spectrum fit.                                           */
-    Eigen::VectorXd p_eps;
-    Eigen::VectorXd r_eps;
-    for (int j = 0; j < base_tell_offset_; ++j)   // stellar parameters
-    {
+    /*  These are the expensive columns: one of them rebuilds the whole surface
+     *  spectrum (on a metal grid, the product of every species over the union
+     *  wavelength grid plus two convolutions) and then rebins it onto every
+     *  spectrum it feeds.  There are as many as there are free stellar
+     *  parameter slots -- 28 on this star, one per element -- and they are
+     *  completely independent of one another, so this is where the fit has its
+     *  parallelism.  The convolution kernels underneath have their own
+     *  OpenMP loops; nested parallelism is off by default, so those run serial
+     *  inside a thread here, which is the right way round: a column is a much
+     *  bigger unit of work than a row of a kernel.                            */
+    std::vector<int> stellar_cols;
+    for (int j = 0; j < base_tell_offset_; ++j) {
         if (!is_free(j)) continue;                // column is never read
+        if (param_datasets_[static_cast<std::size_t>(j)].empty()) continue;
+        stellar_cols.push_back(j);
+    }
 
-        const auto& affected = param_datasets_[static_cast<std::size_t>(j)];
-        if (affected.empty()) continue;           // feeds no spectrum
+    #pragma omp parallel
+    {
+        Eigen::VectorXd p_eps(parameters.size());
+        Eigen::VectorXd r_eps(num_residuals_);
 
-        const double h = eps_base * (std::abs(parameters[j]) + 1.0);
-        p_eps = parameters;
-        p_eps[j] += h;
+        #pragma omp for schedule(dynamic, 1)
+        for (std::ptrdiff_t t = 0;
+             t < static_cast<std::ptrdiff_t>(stellar_cols.size()); ++t) {
+            const int j     = stellar_cols[t];
+            const int j_col = column_of(j);
+            if (j_col < 0) continue;
+            const auto& affected = param_datasets_[static_cast<std::size_t>(j)];
 
-        r_eps = r0;                               // untouched rows are identical
-        for (int d : affected)
-            rows_of_dataset(static_cast<std::size_t>(d),
-                            synth_of_dataset(p_eps, static_cast<std::size_t>(d)),
-                            all_cont[static_cast<std::size_t>(d)],
-                            all_tell[static_cast<std::size_t>(d)],
-                            r_eps);
+            const double h = eps_base * (std::abs(parameters[j]) + 1.0);
+            p_eps = parameters;
+            p_eps[j] += h;
 
-        for (int d : affected) {
-            const Eigen::Index o = row_offset_[static_cast<std::size_t>(d)];
-            const Eigen::Index n = row_count_ [static_cast<std::size_t>(d)];
-            if (n <= 0) continue;
-            jacobians->col(j).segment(o, n) =
-                (r_eps.segment(o, n) - r0.segment(o, n)) / h;
+            for (int d : affected)
+                rows_of_dataset(static_cast<std::size_t>(d),
+                                synth_of_dataset(p_eps, static_cast<std::size_t>(d)),
+                                all_cont[static_cast<std::size_t>(d)],
+                                all_tell[static_cast<std::size_t>(d)],
+                                r_eps);
+
+            for (int d : affected) {
+                const Eigen::Index o = row_offset_[static_cast<std::size_t>(d)];
+                const Eigen::Index n = row_count_ [static_cast<std::size_t>(d)];
+                if (n <= 0) continue;
+                jacobians->col(j_col).segment(o, n) =
+                    (r_eps.segment(o, n) - r0.segment(o, n)) / h;
+            }
         }
     }
     //std::cout << "[CostFunc] Finite Differences done." << std::endl;

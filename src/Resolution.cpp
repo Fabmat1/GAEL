@@ -7,6 +7,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <cstdlib>
 #include <string>
 
@@ -112,6 +113,14 @@ static std::unordered_map<CacheKey, std::pair<WeightsPtr, std::size_t>,
 static std::list<CacheKey> g_lruList;
 static std::mutex g_cacheMutex;
 static std::size_t g_cacheBytes = 0;
+
+/*  Keys a thread is currently computing, so that the others wait for it
+ *  instead of computing the same thing.  Without this, the first Jacobian of
+ *  a metal fit has every thread miss the same key at once and each build its
+ *  own copy of a weight set that runs to half a gigabyte -- the work is
+ *  thrown away and the peak memory is not.                                  */
+static std::vector<CacheKey>      g_inflight;
+static std::condition_variable   g_inflightCv;
 
 /*  A budget rather than an entry count.  One weight set is `n_out` segments of
  *  however many input points fall inside 5 sigma, so its size swings by three
@@ -395,28 +404,52 @@ Vector degrade_resolution(const Vector& lam,
     // Create cache key
     CacheKey key = make_cache_key(lam, lam_out, resOffset, resSlope);
 
-    // Check if weights are cached
+    /*  Single-flight: one thread computes a given weight set, the others wait
+     *  for it rather than each building their own half-gigabyte copy.  With
+     *  the Jacobian's columns running in parallel, a cold key is missed by
+     *  every thread at the same moment.                                     */
     {
-        WeightsPtr hit;
-        {
-            std::lock_guard<std::mutex> lock(g_cacheMutex);
+        std::unique_lock<std::mutex> lock(g_cacheMutex);
+        for (;;) {
             auto it = g_weightCache.find(key);
             if (it != g_weightCache.end()) {
-                hit = it->second.first;     // keep alive past the lock
+                WeightsPtr hit = it->second.first;   // keep alive past the lock
                 touch_key(key);
+                lock.unlock();
+                return apply_weights(flux, *hit);
             }
+            if (std::find(g_inflight.begin(), g_inflight.end(), key)
+                    == g_inflight.end()) {
+                g_inflight.push_back(key);           // this thread computes it
+                break;
+            }
+            g_inflightCv.wait(lock);
         }
-        if (hit) return apply_weights(flux, *hit);
     }
 
-    // Compute weights
-    auto weights = compute_weights(lam, lam_out, resOffset, resSlope);
+    auto drop_inflight = [&] {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        auto it = std::find(g_inflight.begin(), g_inflight.end(), key);
+        if (it != g_inflight.end()) g_inflight.erase(it);
+        g_inflightCv.notify_all();
+    };
+
+    std::vector<WeightSegment> weights;
+    try {
+        weights = compute_weights(lam, lam_out, resOffset, resSlope);
+    } catch (...) {
+        drop_inflight();
+        throw;
+    }
 
     // Insert into cache with LRU enforcement
     WeightsPtr w;
     {
         std::lock_guard<std::mutex> lock(g_cacheMutex);
         w = insert_cache_entry(key, std::move(weights));
+        auto it = std::find(g_inflight.begin(), g_inflight.end(), key);
+        if (it != g_inflight.end()) g_inflight.erase(it);
+        g_inflightCv.notify_all();
     }
 
     // Apply weights

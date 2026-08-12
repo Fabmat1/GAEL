@@ -7,6 +7,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <cassert>
 #include <cstdint>
 
@@ -352,12 +353,53 @@ struct RotSegments {
     std::vector<std::size_t>   off;     // n_out + 1 : offsets into w
     std::vector<double>        w;       // flat weights
 
+    /* ---- shift-invariant core (see compute_segments) -------------------- *
+     *  When the two grids are the same log-uniform grid, every output point
+     *  in [core_lo, core_hi) has the identical run of weights at the identical
+     *  offset from itself, so one copy is kept instead of n_out of them and
+     *  `w` only carries the two edges.                                      */
+    bool           uniform  = false;
+    std::ptrdiff_t core_lo  = 0;        // first output point using `core_w`
+    std::ptrdiff_t core_hi  = 0;        // one past the last
+    std::ptrdiff_t core_off = 0;        // input index of core_w[0] is i+core_off
+    std::vector<double> core_w;
+
     std::size_t bytes() const {
         return start.capacity() * sizeof(std::uint32_t)
              + off.capacity()   * sizeof(std::size_t)
-             + w.capacity()     * sizeof(double);
+             + w.capacity()     * sizeof(double)
+             + core_w.capacity()* sizeof(double);
     }
 };
+
+/* ------------------------------------------------------------------ *
+ *  Is `lam` uniform in ln(lambda)?
+ *
+ *  conv_grid() (SyntheticModel.cpp) builds the metal path's convolution grid
+ *  as lam_lo * exp(i * step), which is what makes the answer yes there.  The
+ *  test is deliberately strict -- a grid that is only nearly log-uniform must
+ *  take the general path, because the whole point of the fast one is that one
+ *  set of weights stands for every output point.
+ * ------------------------------------------------------------------ */
+bool is_log_uniform(const Vector& lam, double& step_out)
+{
+    const std::ptrdiff_t n = lam.size();
+    if (n < 3 || lam[0] <= 0.0) return false;
+
+    const double step = std::log(lam[n - 1] / lam[0]) / double(n - 1);
+    if (!(step > 0.0)) return false;
+
+    /*  Relative tolerance on each interval.  Rounding in exp() leaves a few
+     *  ULP; 1e-9 of the step is far tighter than that and far looser than
+     *  anything that would let a genuinely non-uniform grid through.        */
+    const double tol = 1e-9 * step;
+    for (std::ptrdiff_t i = 1; i < n; ++i) {
+        if (!(lam[i] > lam[i - 1])) return false;
+        if (std::abs(std::log(lam[i] / lam[i - 1]) - step) > tol) return false;
+    }
+    step_out = step;
+    return true;
+}
 
 RotSegments compute_segments(const Vector& lam_in,
                              const Vector& lam_out,
@@ -418,13 +460,6 @@ RotSegments compute_segments(const Vector& lam_in,
             static_cast<std::size_t>(jb - ja + 2);
     }
 
-    /* ---- prefix sum -> flat offsets ------------------------------------ */
-    S.off[0] = 0;
-    for (std::ptrdiff_t i = 0; i < N; ++i)
-        S.off[static_cast<std::size_t>(i) + 1] +=
-            S.off[static_cast<std::size_t>(i)];
-    S.w.assign(S.off[static_cast<std::size_t>(N)], 0.0);
-
     /*  Reciprocal input spacings.  Every one of the n_kernel taps of every
      *  output point interpolates inside one input interval, so this turns
      *  ~n_out * n_kernel divisions into that many multiplies for M extra.   */
@@ -433,13 +468,12 @@ RotSegments compute_segments(const Vector& lam_in,
     for (std::ptrdiff_t j = 1; j < M; ++j)
         inv_dl[static_cast<std::size_t>(j)] = 1.0 / (li[j] - li[j - 1]);
 
-    /* ---- pass 2: accumulate the taps ----------------------------------- */
-    #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t i = 0; i < N; ++i) {
-        const std::size_t base = S.off[static_cast<std::size_t>(i)];
-        const std::ptrdiff_t s = S.start[static_cast<std::size_t>(i)];
-        double* wp = S.w.data() + base;
-
+    /*  The taps of output point i, accumulated into `wp` (which must hold the
+     *  point's whole run, zeroed, starting at input index `s`).  Written once
+     *  and used for the per-point storage and for the shared core alike, so
+     *  the two cannot drift apart.                                          */
+    auto fill_point = [&](std::ptrdiff_t i, std::ptrdiff_t s, std::size_t len,
+                          double* wp) {
         std::ptrdiff_t cur = s + 1;          // running lower_bound cursor
         double sum = 0.0;
 
@@ -462,7 +496,6 @@ RotSegments compute_segments(const Vector& lam_in,
 
         if (sum > 0.0) {
             const double inv = 1.0 / sum;
-            const std::size_t len = S.off[static_cast<std::size_t>(i) + 1] - base;
             for (std::size_t q = 0; q < len; ++q) wp[q] *= inv;
         } else {
             /*  Every tap fell outside the input grid.  Cannot happen while
@@ -470,6 +503,72 @@ RotSegments compute_segments(const Vector& lam_in,
              *  identity fallback rather than emitting a zero.               */
             wp[0] = 1.0;
         }
+    };
+
+    /* ---- shift-invariant core ------------------------------------------ *
+     *  On one grid that is uniform in ln(lambda), the taps of output point i
+     *  sit at ln(lam_i) + ln(1 + v_k/c): a fixed offset in log space, hence a
+     *  fixed offset in index, with fixed interpolation fractions.  Every
+     *  interior point therefore has the *same* run of weights at the same
+     *  offset from itself, and the per-point table is n_out identical copies
+     *  of it -- 1.07 GB of them for an 18-arm UVES metal fit, which is four
+     *  times the cache budget, so it was being rebuilt on nearly every call
+     *  and then streamed in full on every application.
+     *
+     *  Which points qualify is read off pass 1 rather than derived: the core
+     *  is the run of points whose window has the same shape and the same
+     *  offset as the middle one's, which excludes exactly the two ends, where
+     *  taps fall off the grid and the normalisation differs.  If the grid is
+     *  not log-uniform this collapses to nothing and the general path below
+     *  runs unchanged.                                                       */
+    double log_step = 0.0;
+    const bool same_grid = (M == N) && (li == lo);
+    if (same_grid && is_log_uniform(lam_in, log_step)) {
+        const std::ptrdiff_t mid = N / 2;
+        const std::ptrdiff_t s_mid   = S.start[static_cast<std::size_t>(mid)];
+        const std::size_t    len_mid = S.off[static_cast<std::size_t>(mid) + 1];
+
+        std::ptrdiff_t lo_i = mid, hi_i = mid + 1;
+        auto same_shape = [&](std::ptrdiff_t i) {
+            return S.off[static_cast<std::size_t>(i) + 1] == len_mid &&
+                   static_cast<std::ptrdiff_t>(
+                       S.start[static_cast<std::size_t>(i)]) - i == s_mid - mid;
+        };
+        while (lo_i > 0        && same_shape(lo_i - 1)) --lo_i;
+        while (hi_i < N        && same_shape(hi_i))     ++hi_i;
+
+        /*  Only worth the second representation if it covers most of the grid;
+         *  otherwise the edges would carry the cost twice.                   */
+        if (hi_i - lo_i > N / 2) {
+            S.uniform  = true;
+            S.core_lo  = lo_i;
+            S.core_hi  = hi_i;
+            S.core_off = s_mid - mid;
+            S.core_w.assign(len_mid, 0.0);
+            fill_point(mid, s_mid, len_mid, S.core_w.data());
+
+            /*  Flat storage for the two edges only.  Interior points keep an
+             *  empty run so that `off` stays a valid prefix sum.             */
+            for (std::ptrdiff_t i = lo_i; i < hi_i; ++i)
+                S.off[static_cast<std::size_t>(i) + 1] = 0;
+        }
+    }
+
+    /* ---- prefix sum -> flat offsets ------------------------------------ */
+    S.off[0] = 0;
+    for (std::ptrdiff_t i = 0; i < N; ++i)
+        S.off[static_cast<std::size_t>(i) + 1] +=
+            S.off[static_cast<std::size_t>(i)];
+    S.w.assign(S.off[static_cast<std::size_t>(N)], 0.0);
+
+    /* ---- pass 2: accumulate the taps ----------------------------------- */
+    #pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < N; ++i) {
+        const std::size_t base = S.off[static_cast<std::size_t>(i)];
+        const std::size_t len  = S.off[static_cast<std::size_t>(i) + 1] - base;
+        if (len == 0) continue;                    // covered by the core
+        fill_point(i, S.start[static_cast<std::size_t>(i)], len,
+                   S.w.data() + base);
     }
 
     return S;
@@ -481,8 +580,28 @@ Vector apply_segments(const Vector& flux, const RotSegments& S)
     Vector out(N);
     const double* f = flux.data();
 
+    /*  The shift-invariant interior: one kernel, small enough to sit in L1,
+     *  slid along the flux.  The general branch below reads a distinct run of
+     *  weights per output point, which on the metal path means streaming a
+     *  gigabyte of table to produce five megabytes of spectrum.             */
+    if (S.uniform) {
+        const double*      kw  = S.core_w.data();
+        const std::size_t  klen = S.core_w.size();
+        const std::ptrdiff_t koff = S.core_off;
+
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t i = S.core_lo; i < S.core_hi; ++i) {
+            const double* fp = f + i + koff;
+            double sum = 0.0;
+            #pragma omp simd reduction(+:sum)
+            for (std::size_t q = 0; q < klen; ++q) sum += kw[q] * fp[q];
+            out[i] = sum;
+        }
+    }
+
     #pragma omp parallel for schedule(static)
     for (std::ptrdiff_t i = 0; i < N; ++i) {
+        if (S.uniform && i >= S.core_lo && i < S.core_hi) continue;
         const std::size_t b   = S.off[static_cast<std::size_t>(i)];
         const std::size_t e   = S.off[static_cast<std::size_t>(i) + 1];
         const double*     fp  = f + S.start[static_cast<std::size_t>(i)];
@@ -528,6 +647,8 @@ std::unordered_map<SegKey, std::pair<SegPtr, std::size_t>, SegKeyHash> g_segCach
 std::list<SegKey> g_segLru;
 std::mutex        g_segMtx;
 std::size_t       g_segBytes = 0;
+std::vector<SegKey>     g_segInflight;
+std::condition_variable g_segInflightCv;
 constexpr std::size_t SEG_MAX_BYTES = 256ull << 20;
 
 } // anonymous namespace
@@ -562,29 +683,64 @@ Vector rotational_broaden(const Vector& lam_in,
     key.out_start = lam_out[0];
     key.out_end   = lam_out[lam_out.size() - 1];
 
-    SegPtr hit;
+    /*  Single-flight, as in Resolution.cpp: with the Jacobian's columns in
+     *  parallel every thread misses a cold key at the same moment, and each
+     *  would otherwise build its own copy of the segments.                  */
     {
-        std::lock_guard<std::mutex> lk(g_segMtx);
-        auto it = g_segCache.find(key);
-        if (it != g_segCache.end()) {
-            g_segLru.remove(key);
-            g_segLru.push_front(key);
-            hit = it->second.first;            // keep alive past the lock
+        std::unique_lock<std::mutex> lk(g_segMtx);
+        for (;;) {
+            auto it = g_segCache.find(key);
+            if (it != g_segCache.end()) {
+                g_segLru.remove(key);
+                g_segLru.push_front(key);
+                SegPtr hit = it->second.first;   // keep alive past the lock
+                lk.unlock();
+                return apply_segments(flux, *hit);
+            }
+            if (std::find(g_segInflight.begin(), g_segInflight.end(), key)
+                    == g_segInflight.end()) {
+                g_segInflight.push_back(key);
+                break;
+            }
+            g_segInflightCv.wait(lk);
         }
     }
-    if (hit) return apply_segments(flux, *hit);
+
+    struct FlightGuard {
+        SegKey key; bool armed = true;
+        ~FlightGuard() {
+            if (!armed) return;
+            std::lock_guard<std::mutex> lk(g_segMtx);
+            auto it = std::find(g_segInflight.begin(), g_segInflight.end(), key);
+            if (it != g_segInflight.end()) g_segInflight.erase(it);
+            g_segInflightCv.notify_all();
+        }
+    } flight{key};
 
     auto seg = std::make_shared<const RotSegments>(
         compute_segments(lam_in, lam_out, vsini_kms, epsilon, n_kernel));
 
     {
         std::lock_guard<std::mutex> lk(g_segMtx);
+        flight.armed = false;
+        {
+            auto it = std::find(g_segInflight.begin(), g_segInflight.end(), key);
+            if (it != g_segInflight.end()) g_segInflight.erase(it);
+            g_segInflightCv.notify_all();
+        }
         if (g_segCache.find(key) == g_segCache.end()) {
             const std::size_t nb = seg->bytes();
             g_segCache[key] = {seg, nb};
             g_segLru.push_front(key);
             g_segBytes += nb;
-            while (g_segCache.size() > 1 && g_segBytes > SEG_MAX_BYTES) {
+            /*  Two entries are kept whatever the budget says, not one.
+             *  vsini is a fitted parameter, so every Jacobian asks for the
+             *  weights at vsini and again at vsini+h; with room for a single
+             *  entry those two evict each other and each gets rebuilt from
+             *  scratch.  That costs nothing on the shift-invariant path (the
+             *  tables are ~10 MB there) and is the difference between a cache
+             *  and a treadmill on an input grid that is not log-uniform.    */
+            while (g_segCache.size() > 2 && g_segBytes > SEG_MAX_BYTES) {
                 const SegKey victim = g_segLru.back();
                 if (auto it = g_segCache.find(victim); it != g_segCache.end()) {
                     g_segBytes -= std::min(g_segBytes, it->second.second);

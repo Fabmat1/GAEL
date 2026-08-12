@@ -5,12 +5,14 @@
 #include "Spectrum.hpp"
 
 #include <ankerl/unordered_dense.h>
+#include <condition_variable>
 #include <list>
 #include <mutex>
 #include <memory>
 #include <optional>
 #include <iostream>
 #include <shared_mutex>
+#include <unordered_set>
 
 namespace specfit {
 
@@ -63,6 +65,16 @@ public:
      *  both.                                                               */
     void set_memory_budget(std::size_t bytes);
 
+    /*  Raise the budget to `bytes` if it is currently lower, leaving a larger
+     *  one (a --cache-mem on the command line) alone.  The caller that knows
+     *  how many working sets will be live at once is the fit, not the CLI:
+     *  evaluating the Jacobian's columns in parallel puts one model surface
+     *  plus one synthetic spectrum per fitted arm in flight *per thread*, and
+     *  a budget sized for a single one of those turns the cache into a
+     *  treadmill -- every column rebuilding the surface it evicted while
+     *  rebinning the previous arm.                                          */
+    void ensure_memory_budget(std::size_t bytes);
+
     void clear();
 
     /* ------------ diagnostics -------------------------------------- */
@@ -90,6 +102,11 @@ private:
     mutable std::shared_mutex mtx_;
     mutable Map     cache_;
     mutable LruList lru_;
+
+    /*  Keys some thread is building right now, and who to wake when it is
+     *  done.  See insert_if_absent().                                      */
+    mutable std::unordered_set<std::size_t>   inflight_;
+    mutable std::condition_variable_any       inflight_cv_;
     std::size_t     bytes_       = 0;
     std::size_t     max_entries_ = 0;              // 0 == no entry cap
     std::size_t     max_bytes_   = 128ull << 20;   // see --cache-mem in main.cpp
@@ -98,29 +115,62 @@ private:
 /* ===================================================================== *
  *  template implementation
  * ===================================================================== */
+/*  Single-flight: at most one thread builds any given key, the rest wait for
+ *  it and take its result.
+ *
+ *  The build deliberately happens outside the lock -- it is the expensive part
+ *  and holding the cache during it would serialise every unrelated lookup --
+ *  but that alone lets N threads that miss the same key simultaneously each
+ *  build their own copy and then throw all but one away.  That was harmless
+ *  while the Jacobian was evaluated one column at a time; with its columns in
+ *  parallel it is not.  Every dataset of a joint fit wants the *same* model
+ *  surface, so the first thing the cost function does is have every thread
+ *  miss the same key at once: on an 18-arm metal fit that meant sixteen
+ *  concurrent builds of one ~700 k-point surface, sixteen times the work and
+ *  sixteen times the transient memory.                                      */
 template<typename Producer>
 SpectrumPtr SpectrumCache::insert_if_absent(std::size_t hash,
                                             Producer&&   make)
 {
-    {   
+    {
         std::unique_lock lk(mtx_);
-        auto it = cache_.find(hash);
-        if (it != cache_.end()) {
-            touch_(it);
-            return it->second.sp;          //  fast-path hit
+        for (;;) {
+            auto it = cache_.find(hash);
+            if (it != cache_.end()) {
+                touch_(it);
+                return it->second.sp;      //  hit (possibly after waiting)
+            }
+            if (inflight_.insert(hash).second) break;   // this thread builds it
+            inflight_cv_.wait(lk);                      // someone else is on it
         }
     }
+
+    /*  Clears the in-flight marker however this scope is left, so a producer
+     *  that throws wakes the waiters instead of deadlocking them.           */
+    struct FlightGuard {
+        const SpectrumCache* self; std::size_t key; bool armed = true;
+        ~FlightGuard() {
+            if (!armed) return;
+            std::unique_lock lk(self->mtx_);
+            self->inflight_.erase(key);
+            self->inflight_cv_.notify_all();
+        }
+    } guard{this, hash};
 
     /* ---------- build spectrum outside any lock -------------------- */
     // NB: we build the *shared_ptr* directly
     SpectrumPtr new_sp = std::make_shared<Spectrum>(
                              std::forward<Producer>(make)() );
 
-    /* ---------- second attempt / insertion ------------------------- */
+    /* ---------- insertion ------------------------------------------ */
     std::unique_lock lk(mtx_);
+    guard.armed = false;                   // released under this same lock
+    inflight_.erase(hash);
+
     auto it = cache_.find(hash);
-    if (it != cache_.end()) {              // someone else inserted
+    if (it != cache_.end()) {              // evicted-and-refilled in between
         touch_(it);
+        inflight_cv_.notify_all();
         return it->second.sp;
     }
 
@@ -129,6 +179,7 @@ SpectrumPtr SpectrumCache::insert_if_absent(std::size_t hash,
     cache_.try_emplace(hash, Node{new_sp, lru_it, nbytes});
     bytes_ += nbytes;
     evict_if_needed_();
+    inflight_cv_.notify_all();
     return new_sp;
 }
 

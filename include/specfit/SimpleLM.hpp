@@ -70,6 +70,17 @@ struct LMSolverOptions {
     bool   verbose               = false;    // chatty?
     std::vector<LMColumnBlock> column_blocks;   // empty == dense JᵀJ
 
+    /*  The functor already writes only the free columns, in the solver's own
+     *  reduced numbering (see MultiDatasetCost::set_column_map), so the solver
+     *  can work on that matrix directly instead of allocating a second one and
+     *  copying the free columns into it every time the Jacobian is rebuilt --
+     *  1.3 GB allocated, zeroed and copied per accepted step on an 18-arm
+     *  metal fit, to drop about twenty columns of it.
+     *
+     *  A caller setting this MUST give the functor the matching column map:
+     *  the flag and the map describe the same matrix.                       */
+    bool   reduced_jacobian      = false;
+
     /*  Called once per iteration, before the step is computed, with the
      *  1-based iteration number, the iteration budget and the chi2 the
      *  solver is currently sitting on.  Returning false stops the solve at
@@ -220,12 +231,17 @@ struct LMWorkspace
     Eigen::VectorXd dx_free;
     Eigen::VectorXd dx;
 
+    /*  `need_Jf` is false when the cost functor already produces the reduced
+     *  Jacobian, in which case this workspace's copy of it is never read and
+     *  must not be allocated -- it is the largest array here by far.  Every
+     *  other array is still sized from n_free.                              */
     void resize(std::ptrdiff_t m,
                 std::ptrdiff_t n_free,
-                std::ptrdiff_t n_full)
+                std::ptrdiff_t n_full,
+                bool           need_Jf = true)
     {
         /* grow when necessary … */
-        if (Jf.rows()  < m      || Jf.cols()  < n_free)
+        if (need_Jf && (Jf.rows() < m || Jf.cols() < n_free))
             Jf.resize  (std::max<std::ptrdiff_t>(Jf.rows(),  m),
                         std::max<std::ptrdiff_t>(Jf.cols(), n_free));
 
@@ -241,7 +257,8 @@ struct LMWorkspace
 
         /* … and then shrink logically to the exact size that is
            required for the *current* problem instance (no re-alloc): */
-        Jf.conservativeResize  (m, n_free);
+        if (need_Jf) Jf.conservativeResize(m, n_free);
+        else         Jf.resize(0, 0);
         JTJ.conservativeResize (n_free, n_free);
         JTJ0.conservativeResize(n_free, n_free);
         diag_JTJ.conservativeResize(n_free);
@@ -318,7 +335,12 @@ levenberg_marquardt(Functor&&                    func,
     if (opt.chi2_tolerance     <= 0.0) opt.chi2_tolerance     = kLMChi2Tol;
 
     if (opt.initial_lambda  <= 0.0) {
-        Eigen::VectorXd diag = (J.transpose() * J).diagonal();
+        /*  Only the diagonal of JᵀJ is wanted, and the diagonal is just the
+         *  squared norm of each column.  Forming the whole product to throw
+         *  n_free*(n_free-1) of its entries away costs m*n^2 flops instead of
+         *  m*n -- 65 GFLOP against 0.24 on an 18-spectrum metal fit, once per
+         *  levenberg_marquardt() call, plus an n x n temporary.              */
+        Eigen::VectorXd diag = J.colwise().squaredNorm();
         opt.initial_lambda   = 1e-3 * diag.maxCoeff();
         if (opt.initial_lambda == 0.0) opt.initial_lambda = 1e-3;
     }
@@ -343,10 +365,15 @@ levenberg_marquardt(Functor&&                    func,
     Eigen::VectorXd &dx_free   = work ? work->dx_free   : dx_free_local;
     Eigen::VectorXd &dx        = work ? work->dx        : dx_local;
 
+    /*  With a reduced Jacobian, `J` *is* the reduced matrix: Jf would be an
+     *  exact second copy of it, so it is left empty and every use below reads
+     *  `Jr` instead.                                                        */
+    const bool reduced = opt.reduced_jacobian;
+
     /* make sure the arrays are big enough (may allocate once) */
-    if (work) work->resize(m, n_free, n);
+    if (work) work->resize(m, n_free, n, /*need_Jf=*/!reduced);
     else {                 // original behaviour
-        Jf.resize  (m, n_free);
+        if (!reduced) Jf.resize(m, n_free);
         JTJ.resize (n_free, n_free);
         JTJ0.resize(n_free, n_free);
         diag_JTJ.resize(n_free);
@@ -354,6 +381,9 @@ levenberg_marquardt(Functor&&                    func,
         dx_free.resize(n_free);
         dx.resize(n);
     }
+
+    /*  The matrix the normal equations are actually formed from. */
+    Eigen::MatrixXd& Jr = reduced ? J : Jf;
 
     if (opt.verbose) {
         std::cout << "[LM] One time allocations complete." << std::endl;
@@ -398,21 +428,22 @@ levenberg_marquardt(Functor&&                    func,
                 std::cout << "[LM] Building Reduced Jacobian." << std::endl;
 
             /* ----- build reduced Jacobian (copy only the free columns) -- */
-            for (int j = 0; j < n; ++j) {
-                int col = col_index[j];
-                if (col >= 0) Jf.col(col).noalias() = J.col(j);
-            }
+            if (!reduced)
+                for (int j = 0; j < n; ++j) {
+                    int col = col_index[j];
+                    if (col >= 0) Jf.col(col).noalias() = J.col(j);
+                }
 
             if (opt.verbose)
                 std::cout << "[LM] Built Reduced Jacobian. Transposing." << std::endl;
 
             /* --------------- g = Jᵀ r  and  JTJ0 = JᵀJ ----------------- */
-            normal_equations(Jf, r, blocks, JTJ0, g);
+            normal_equations(Jr, r, blocks, JTJ0, g);
 
             if (check_blocks && !blocks.empty()) {
                 Eigen::MatrixXd JTJ_dense(n_free, n_free);
                 Eigen::VectorXd g_dense(n_free);
-                normal_equations(Jf, r, {}, JTJ_dense, g_dense);
+                normal_equations(Jr, r, {}, JTJ_dense, g_dense);
                 std::cout << "[LM] block check: max|dJTJ| = "
                           << (JTJ_dense - JTJ0).cwiseAbs().maxCoeff()
                           << "  max|dg| = "
@@ -593,11 +624,12 @@ levenberg_marquardt(Functor&&                    func,
     summ.param_uncertainties.assign(n, 0.0);
     if (n_free > 0) {
         /* reuse Jf and JTJ already allocated ------------------------- */
-        for (int j = 0; j < n; ++j) {
-            int col = col_index[j];
-            if (col >= 0) Jf.col(col).noalias() = J.col(j);
-        }
-        normal_equations(Jf, r, blocks, JTJ, g);
+        if (!reduced)
+            for (int j = 0; j < n; ++j) {
+                int col = col_index[j];
+                if (col >= 0) Jf.col(col).noalias() = J.col(j);
+            }
+        normal_equations(Jr, r, blocks, JTJ, g);
 
         const double dof = std::max<std::size_t>(m - n_free, 1);
         const double var = r.squaredNorm() / dof;             // σ² ≈ χ²/dof

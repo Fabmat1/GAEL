@@ -60,6 +60,18 @@ public:
      *  (the default) means "assume everything is free".                     */
     void set_free_mask(const std::vector<bool>& mask) { free_mask_ = mask; }
 
+    /*  Where each parameter's column goes in the matrix handed to operator().
+     *
+     *  Empty (the default) means "one column per parameter", i.e. the full
+     *  n_total_params_-wide Jacobian.  Set to the solver's own full->reduced
+     *  column map, the matrix is only as wide as there are free parameters and
+     *  the column for parameter j is written at col_map[j] (-1 = frozen, never
+     *  written).  That is exactly what the solver goes on to use, so it saves
+     *  allocating, zeroing and then copying a second matrix of the same size:
+     *  on an 18-arm metal fit the full Jacobian is 1.3 GB and only ~20 of its
+     *  347 columns are dropped on the way into the reduced one.             */
+    void set_column_map(const std::vector<int>& col_map) { col_map_ = col_map; }
+
     /*  Residual-row layout, so the solver can be told that a spectrum's
      *  continuum anchors cannot reach any other spectrum's rows.            */
     const std::vector<int>& row_offsets() const { return row_offset_; }
@@ -109,10 +121,29 @@ private:
     std::vector<std::vector<int>> param_datasets_;
 
     std::vector<bool>        free_mask_;   // empty == everything free
+    std::vector<int>         col_map_;     // empty == column j is column j
 
     bool is_free(int j) const
     { return free_mask_.empty() ||
              (j < static_cast<int>(free_mask_.size()) && free_mask_[j]); }
+
+    /*  Column of the output matrix that parameter j is written to, or -1 when
+     *  it has none.  Pairs with is_free(): a parameter that is not free has no
+     *  column under a reduced map and is never differenced anyway.           */
+    int column_of(int j) const
+    {
+        if (col_map_.empty()) return j;
+        return (j < static_cast<int>(col_map_.size())) ? col_map_[j] : -1;
+    }
+
+    /*  Width of the matrix operator() fills. */
+    int jacobian_cols() const
+    {
+        if (col_map_.empty()) return n_total_params_;
+        int n = 0;
+        for (int c : col_map_) n = std::max(n, c + 1);
+        return n;
+    }
 
     const ParameterIndexer&  indexer_;
 };

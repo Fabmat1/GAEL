@@ -8,6 +8,7 @@
 #include "specfit/Rebin.hpp"
 #include "specfit/AkimaSpline.hpp"
 #include "specfit/ParameterIndexer.hpp"
+#include "specfit/SpectrumCache.hpp"
 #include <Eigen/Core>
 #include <omp.h>
 #include <algorithm>
@@ -620,6 +621,32 @@ FitResult GaelSession::run_impl()
 
     wcfg.progress          = &progress;
     wcfg.progress_phase    = fit_phase;
+
+    /* ---- size the model-spectrum cache for the concurrency it will see ---- *
+     *  MultiDatasetCost evaluates the Jacobian's columns in parallel, and one
+     *  column keeps a model surface spectrum alive while it rebins that
+     *  surface onto every fitted arm in turn.  The live working set is
+     *  therefore nt * (one surface + one synthetic per arm), not one of them,
+     *  and a budget sized for one makes every column rebuild the surface it
+     *  evicted itself while rebinning the previous arm -- which on a metal
+     *  grid means the product of every species over the union wavelength grid
+     *  plus two convolutions, for nothing.
+     *
+     *  The surface term is an upper bound (a metal model's convolution grid
+     *  runs to ~700 k points, an HHE one to ~15 k) and the budget is only a
+     *  ceiling, so overestimating costs nothing when the fit does not use the
+     *  room.  A bigger --cache-mem is left alone.                            */
+    {
+        std::size_t obs_points = 0;
+        for (const auto& ds : datasets)
+            obs_points += static_cast<std::size_t>(ds.obs.lambda.size());
+
+        constexpr std::size_t kSurfaceBytes = 24ull << 20;   // ~1e6 pts x 3 x 8
+        const std::size_t per_thread =
+            kSurfaceBytes + obs_points * 3 * sizeof(double);
+        ::specfit::SpectrumCache::instance().ensure_memory_budget(
+            static_cast<std::size_t>(std::max(1, nt)) * per_thread);
+    }
 
     ::specfit::UnifiedFitWorkflow wf(datasets, model, wcfg, frozen, nt);
 

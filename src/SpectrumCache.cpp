@@ -32,6 +32,11 @@ void SpectrumCache::set_memory_budget(std::size_t bytes)
     max_bytes_ = bytes;
     evict_if_needed_();
 }
+void SpectrumCache::ensure_memory_budget(std::size_t bytes)
+{
+    std::unique_lock lk(mtx_);
+    if (bytes > max_bytes_) max_bytes_ = bytes;
+}
 void SpectrumCache::clear()
 {
     std::unique_lock lk(mtx_);

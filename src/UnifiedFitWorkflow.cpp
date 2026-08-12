@@ -476,6 +476,20 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
      *  a five-spectrum fit, for nothing.                                    */
     cost.set_free_mask(free_mask);
 
+    /*  ... and where each of them lands.  The solver only ever forms its
+     *  normal equations from the free columns, so having the cost function
+     *  write them in that numbering straight away saves building the full
+     *  Npar-wide matrix and copying it down -- the two are the same size to
+     *  within the handful of frozen parameters.  The map has to be the one
+     *  the solver derives from the same mask, hence build_free_index.       */
+    {
+        Eigen::VectorXi col_index;
+        int n_free_cols = 0;
+        build_free_index(free_mask, col_index, n_free_cols);
+        cost.set_column_map(std::vector<int>(col_index.data(),
+                                             col_index.data() + col_index.size()));
+    }
+
     /*  Structural sparsity of the Jacobian: a stellar parameter reaches every
      *  residual, but a continuum anchor of spectrum d reaches only spectrum
      *  d's rows.  Telling LM so turns one dense JᵀJ into a handful of small
@@ -509,9 +523,10 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
     }
     
     LMSolverOptions lm_opt;
-    lm_opt.max_iterations = max_iterations;
-    lm_opt.verbose        = false;
-    lm_opt.column_blocks  = std::move(col_blocks);
+    lm_opt.max_iterations   = max_iterations;
+    lm_opt.verbose          = false;
+    lm_opt.column_blocks    = std::move(col_blocks);
+    lm_opt.reduced_jacobian = true;   // matches the column map set above
 
     /*  Sub-progress of the phase this stage belongs to; see
      *  lm_iteration_progress() for why it is not it/max_iterations.       */
