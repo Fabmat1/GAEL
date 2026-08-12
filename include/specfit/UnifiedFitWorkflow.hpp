@@ -65,6 +65,22 @@ public:
     void quick_refit(int max_iterations = 60);
 
     Vector get_model_for_dataset(std::size_t dataset_idx) const;
+
+    /*  One component's own model on the dataset's wavelength grid: the fitted
+     *  continuum (and telluric transmission, when the spectrum fits one) times
+     *  that component's normalised flux alone, undiluted by the other
+     *  component's light.  Same thing as get_model_for_dataset for a
+     *  single-component fit.                                                 */
+    Vector get_component_model_for_dataset(std::size_t dataset_idx,
+                                           int component) const;
+
+    /*  Lower/upper solver limit of every entry of the global parameter vector;
+     *  continuum and telluric entries report +-inf.  Lets a consumer see which
+     *  side of its range a converged parameter is pinned against -- an
+     *  abundance sitting at the low edge of its axis is an upper limit, not a
+     *  measurement.                                                          */
+    std::vector<std::pair<double,double>> get_param_limits() const;
+
     const LMSolverSummary& get_summary() const { return summary_; }
     const std::vector<double>& get_parameters()   const { return unified_params_; }
     const std::vector<double>& get_uncertainties() const { return final_uncertainties_; }
@@ -107,6 +123,10 @@ private:
 
     /*  Grid coverage intersected over every component's grid. */
     ModelGrid::ParameterBounds grid_bounds() const;
+
+    /*  Shared implementation of the two model getters: `only_component` < 0
+     *  builds the composite model, otherwise just that component's.          */
+    Vector model_for_dataset(std::size_t dataset_idx, int only_component) const;
 
     /*  Solver limits on one parameter: the grid answers for the axes it has,
      *  the rest is fit policy (ISIS's stellar_set_ranges).                   */

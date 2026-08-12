@@ -187,6 +187,14 @@ struct StellarParamResult {
     double error  = 0.0;       // 0 if frozen
     bool   frozen = false;
     bool   at_boundary = false;
+
+    /*  Which side of its allowed range the value is pinned against: -1 at the
+     *  lower limit, +1 at the upper one, 0 in the interior.  `at_boundary` is
+     *  exactly `boundary_side != 0`; the side is what tells a consumer whether
+     *  an abundance ran into the bottom of its grid axis (the line is not
+     *  detected -- an upper limit) or the top of it (a lower limit).  Only
+     *  free parameters are checked: a frozen one sits where it was put.      */
+    int    boundary_side = 0;
     // Trivially destructible — leave implicit.
 };
 
@@ -232,6 +240,17 @@ struct SpectrumResult {
     Vector model;
     // fitted continuum spline evaluated on the same lambda grid
     Vector continuum;
+
+    /*  Each component's own model on the same lambda grid, in component order:
+     *  the fitted continuum (and telluric, when one was fitted) times that
+     *  component's normalised flux alone, i.e. what the spectrum would look
+     *  like if that component were the only star in it.  A component's lines
+     *  therefore appear at full depth here, undiluted by the other's light,
+     *  which is what makes the two curves comparable when overplotted.
+     *
+     *  One entry per component always; for a single-component fit the single
+     *  entry equals `model`.                                                 */
+    std::vector<Vector> component_models;
 
     // continuum-spline anchors
     Vector cont_x;

@@ -25,6 +25,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from . import isis_patch
 from .jobs import Case, FitOutcome, ParamResult, file_digest, stable_json
 
 # Bump when the generated script or the parsing changes in a way that
@@ -156,21 +157,25 @@ def cache_key(case: Case, base_paths: list[str]) -> str:
     script = build_script(
         case, [f"s{i + 1}.txt" for i in range(case.n_spectra)], base_paths
     )
-    payload = stable_json(
-        {
-            "version": CACHE_VERSION,
-            "script": script,
-            "spectra": [
-                {
-                    "digest": d,
-                    "res_offset": r.res_offset,
-                    "res_slope": r.res_slope,
-                }
-                for d, r in zip(digests, case.spectra)
-            ],
-        }
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
+    body = {
+        "version": CACHE_VERSION,
+        "script": script,
+        "spectra": [
+            {
+                "digest": d,
+                "res_offset": r.res_offset,
+                "res_slope": r.res_slope,
+            }
+            for d, r in zip(digests, case.spectra)
+        ],
+    }
+    # Only cases that are actually run against a patched ISIS carry the patch
+    # in their key.  The two scopes are the same set by construction (see
+    # isis_patch), so every reference cached before the patch existed stays
+    # valid -- which matters: refilling the cache costs ~45 min on 16 cores.
+    if isis_patch.needs_patch(case):
+        body["isis_patch"] = isis_patch.PATCH_ID
+    return hashlib.sha256(stable_json(body).encode()).hexdigest()
 
 
 def cache_path(cache_dir: Path, key: str) -> Path:
@@ -208,6 +213,10 @@ def store_cached(cache_dir: Path, key: str, case: Case, outcome: FitOutcome) -> 
 def run(case: Case, cfg, work_root: Path | None = None) -> FitOutcome:
     """Run ISIS for *case* in a throwaway directory and parse the results."""
     started = time.time()
+    # Raises IsisPatchError before any work is done; get_or_run turns that into
+    # an uncached failure, since it is a property of this machine and not of
+    # the case.
+    rc = isis_patch.prepare(cfg) if isis_patch.needs_patch(case) else None
     workdir = Path(tempfile.mkdtemp(prefix="isisfit-", dir=work_root))
     try:
         filenames = []
@@ -221,8 +230,11 @@ def run(case: Case, cfg, work_root: Path | None = None) -> FitOutcome:
 
         from .config import isis_env
 
+        argv = [str(cfg.isis_bin)]
+        if rc is not None:
+            argv += ["-i", str(rc)]
         proc = subprocess.run(
-            [str(cfg.isis_bin), "fit.sl"],
+            argv + ["fit.sl"],
             cwd=workdir,
             env=isis_env(cfg.isis_bin),
             stdout=subprocess.PIPE,
@@ -420,7 +432,19 @@ def get_or_run(case: Case, cfg, work_root: Path | None = None) -> tuple[FitOutco
             ),
             False,
         )
-    outcome = run(case, cfg, work_root)
+    try:
+        outcome = run(case, cfg, work_root)
+    except isis_patch.IsisPatchError as exc:
+        # Not a property of the case, so it must not enter the cache: the next
+        # run, on a machine where the patch applies, has to try again.
+        return (
+            FitOutcome(
+                ok=False,
+                backend="isis",
+                error=f"cannot patch ISIS for this case: {exc}",
+            ),
+            False,
+        )
     # Failures are cached too: they are reproducible properties of the input
     # (rejected by the SNR filter, outside the grid, ...) and re-running ISIS
     # for them on every invocation would defeat the point of the cache.

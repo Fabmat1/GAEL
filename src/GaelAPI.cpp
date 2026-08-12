@@ -329,13 +329,41 @@ inline void push_param(std::vector<StellarParamResult>& v,
                        const std::vector<double>& all_p,
                        const std::vector<double>& all_err,
                        const std::vector<bool>&   free_mask,
+                       const std::vector<std::pair<double,double>>& limits,
+                       bool user_frozen,
                        int gidx)
 {
     StellarParamResult s;
     s.value       = all_p[gidx];
     s.frozen      = !free_mask[gidx];
     s.error       = (gidx < (int)all_err.size()) ? all_err[gidx] : 0.0;
-    s.at_boundary = false;                       // set below if applicable
+
+    /*  Essentially the test stage 7 uses, so anything flagged here is
+     *  something GAEL itself warned about -- with two differences.
+     *
+     *  `user_frozen`, not `s.frozen`: stage 7 *freezes* the parameters it
+     *  finds at a boundary and refits, so by the time the result is collected
+     *  the ones that ran into their grid are exactly the frozen ones.  What
+     *  disqualifies a parameter is the caller having frozen it, not the
+     *  workflow.
+     *
+     *  And closeness rather than stage 7's one-sided inequality, because a
+     *  value pinned *outside* its axis is not at a boundary: ISIS's
+     *  convention for switching an element out of the model is an abundance
+     *  of 10 or more, which the one-sided form would report as sitting on the
+     *  axis maximum.                                                         */
+    if (!user_frozen && gidx < (int)limits.size()) {
+        constexpr double tol = 1e-6;
+        const double lo = limits[(std::size_t)gidx].first;
+        const double hi = limits[(std::size_t)gidx].second;
+        if (std::isfinite(lo) && std::isfinite(hi) && hi > lo) {
+            if (std::abs(s.value - lo) < tol * std::abs(lo + 1.0))
+                s.boundary_side = -1;
+            else if (std::abs(hi - s.value) < tol * std::abs(hi + 1.0))
+                s.boundary_side = +1;
+        }
+    }
+    s.at_boundary = (s.boundary_side != 0);
     v.push_back(s);
 }
 
@@ -524,6 +552,11 @@ FitResult GaelSession::run()
     R.raw_free_mask     = wf.get_free_mask();
     R.final_chi2        = wf.get_final_chi2();
 
+    /*  Solver limits per global index, so every reported parameter can say
+     *  which side of its range it is pinned against (StellarParamResult::
+     *  boundary_side).                                                       */
+    const auto param_limits = wf.get_param_limits();
+
     const auto& sum     = wf.get_summary();
     R.converged         = sum.converged;
     R.iterations        = sum.iterations;
@@ -554,11 +587,17 @@ FitResult GaelSession::run()
             auto* slot = cr.find(ps.name);
             if (!slot) continue;          // no container for it (yet)
 
+            /*  The caller's own freeze flag, not the workflow's: stage 7 and
+             *  stage 5 freeze parameters of their own accord.               */
+            const auto itf = frozen[(std::size_t)c].find(ps.name);
+            const bool user_frozen = itf != frozen[(std::size_t)c].end()
+                                     && itf->second;
+
             const int reps = is_untied(ps.name) ? n_ds : 1;
             for (int d = 0; d < reps; ++d) {
                 const int gidx = idx.get(c, d, static_cast<int>(p));
                 push_param(*slot, R.raw_params, R.raw_uncertainties,
-                           R.raw_free_mask, gidx);
+                           R.raw_free_mask, param_limits, user_frozen, gidx);
             }
         }
     }
@@ -581,6 +620,12 @@ FitResult GaelSession::run()
         // full model (continuum * stellar) on the rebinned grid
         S.model = wf.get_model_for_dataset(d);
 
+        /*  ... and each component on its own, so a consumer can draw the two
+         *  stars of a binary separately against the composite.               */
+        S.component_models.reserve((std::size_t)n_comp);
+        for (int c = 0; c < n_comp; ++c)
+            S.component_models.push_back(wf.get_component_model_for_dataset(d, c));
+
         Eigen::Map<const Vector> cy(
             R.raw_params.data() + cont_block_start + cs,
             (Eigen::Index)ds.cont_y.size());
@@ -595,7 +640,8 @@ FitResult GaelSession::run()
             if (tb >= 0) {
                 for (int k = 0; k < ::specfit::kNTelluricParams; ++k)
                     push_param(S.telluric_params, R.raw_params,
-                               R.raw_uncertainties, R.raw_free_mask, tb + k);
+                               R.raw_uncertainties, R.raw_free_mask,
+                               param_limits, /*user_frozen=*/false, tb + k);
                 S.telluric = model.telluric->transmission(
                     ds.obs.lambda,
                     R.raw_params[tb + 0], R.raw_params[tb + 1],

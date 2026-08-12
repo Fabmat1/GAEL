@@ -1045,10 +1045,29 @@ void UnifiedFitWorkflow::run()
 
 
 Vector UnifiedFitWorkflow::get_model_for_dataset(size_t dataset_idx) const {
+    return model_for_dataset(dataset_idx, -1);
+}
+
+/*  One component's own model: the same continuum and the same telluric
+ *  transmission, but only component `only_component`'s stellar flux -- what
+ *  the spectrum would look like if that component were the only star in it.
+ *  The surface ratio cancels out of a single component's num/den, so this is
+ *  the component's line profile at full depth rather than its diluted
+ *  contribution to the composite.                                           */
+Vector UnifiedFitWorkflow::get_component_model_for_dataset(size_t dataset_idx,
+                                                           int component) const
+{
+    if (component < 0 || component >= static_cast<int>(model_.grids.size()))
+        throw std::out_of_range("Invalid component index");
+    return model_for_dataset(dataset_idx, component);
+}
+
+Vector UnifiedFitWorkflow::model_for_dataset(size_t dataset_idx,
+                                             int only_component) const {
     if (dataset_idx >= datasets_.size()) {
         throw std::out_of_range("Invalid dataset index");
     }
-    
+
     const auto& ds = datasets_[dataset_idx];
     const int n_points = ds.obs.lambda.size();
     
@@ -1081,13 +1100,26 @@ Vector UnifiedFitWorkflow::get_model_for_dataset(size_t dataset_idx) const {
     // Compute the normalised synthetic spectrum -- see
     // MultiDatasetCost::synth_of_dataset for why a multi-component model is
     // built from calibrated fluxes and summed continua rather than averaged.
-    const bool composite = model_.grids.size() > 1;
+    const bool composite = model_.grids.size() > 1 && only_component < 0;
 
     Vector model = Vector::Zero(n_points);
 
     if (!composite) {
-        model = compute_synthetic(model_.grids[0], stellar[0], ds.obs.lambda,
-                                  ds.resOffset, ds.resSlope).flux;
+        /*  A single-component fit, or one component of a composite one.  The
+         *  latter still needs its own continuum divided out, because a
+         *  component of a composite model is loaded with_continuum.          */
+        const int c = (only_component < 0) ? 0 : only_component;
+        if (model_.grids.size() > 1) {
+            Spectrum synth = compute_synthetic(
+                model_.grids[c], stellar[c], ds.obs.lambda,
+                ds.resOffset, ds.resSlope, /*with_continuum=*/true);
+            for (int i = 0; i < n_points; ++i)
+                model[i] = (synth.cont[i] > 0.0) ? synth.flux[i] / synth.cont[i]
+                                                 : 0.0;
+        } else {
+            model = compute_synthetic(model_.grids[c], stellar[c], ds.obs.lambda,
+                                      ds.resOffset, ds.resSlope).flux;
+        }
     } else {
         Vector num = Vector::Zero(n_points);
         Vector den = Vector::Zero(n_points);
@@ -1118,6 +1150,36 @@ Vector UnifiedFitWorkflow::get_model_for_dataset(size_t dataset_idx) const {
         model = model.cwiseProduct(tr);
     }
     return model;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Solver limits for every entry of the global parameter vector.  Only the
+ *  stellar block has any: the telluric and continuum entries are fit policy
+ *  with no grid behind them and report +-inf, so a consumer checking whether a
+ *  value sits on a boundary never flags one of those.
+ * ------------------------------------------------------------------------- */
+std::vector<std::pair<double,double>>
+UnifiedFitWorkflow::get_param_limits() const
+{
+    constexpr double kInf = std::numeric_limits<double>::infinity();
+    std::vector<std::pair<double,double>> lim(unified_params_.size(),
+                                              { -kInf, kInf });
+
+    const ModelGrid::ParameterBounds gb = grid_bounds();
+    const int n_ds = static_cast<int>(datasets_.size());
+
+    for (int c = 0; c < static_cast<int>(model_.params.size()); ++c) {
+        const auto& table = indexer_.params(c);
+        for (std::size_t p = 0; p < table.size(); ++p) {
+            const auto lp = param_limits(table[p], c, gb);
+            for (int d = 0; d < n_ds; ++d) {
+                const int gidx = indexer_.get(c, d, static_cast<int>(p));
+                if (gidx >= 0 && gidx < static_cast<int>(lim.size()))
+                    lim[static_cast<std::size_t>(gidx)] = lp;
+            }
+        }
+    }
+    return lim;
 }
 
 } // namespace specfit

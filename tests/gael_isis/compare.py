@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import TESTS_DIR
-from .jobs import COMPARED_PARAMS, TIED_PARAMS, UNITS, UNTIED_PARAMS
+from .jobs import COMPARED_PARAMS, UNITS
 
 TOLERANCE_FILE = TESTS_DIR / "tolerances.json"
 
@@ -183,13 +183,24 @@ def statistics(coll: Collection) -> dict:
 
 
 def truth_statistics(results) -> dict:
-    """For mock data: how well each code recovers the generating parameters."""
+    """For mock data: how well each code recovers the generating parameters.
+
+    The parameter names come from the case, not from the legacy bare set: the
+    X-Shooter suites report ``c1_teff``/``c2_teff``, and looking up a bare
+    ``teff`` in their truth left this table silently empty for both of them.
+    A truth dict may still key an unqualified name (the sdB suites do), so that
+    is accepted as a fallback.
+    """
+    from .jobs import split_qualified
+
     acc: dict[str, dict[str, list]] = {}
     for case, isis, gael, _ in results:
         if not case.truth:
             continue
-        for p in TIED_PARAMS:
+        for p in case.settings.tied():
             true_val = case.truth.get(p)
+            if true_val is None:
+                true_val = case.truth.get(split_qualified(p)[1])
             if true_val is None:
                 continue
             for backend, res in (("isis", isis), ("gael", gael)):

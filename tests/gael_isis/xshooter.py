@@ -61,29 +61,36 @@ def _gen_bin() -> Path | None:
 
 
 def _truth_grid(kind: str, i: int) -> dict:
-    """Deterministic, spread over each grid's interior (never on an edge)."""
+    """Deterministic, spread over each grid's interior (never on an edge).
+
+    Keys are component-qualified ("c1_teff", "c2_sur_ratio"), i.e. the names
+    both codes report, so ``compare.truth_statistics`` can line the truth up
+    with the fitted values.
+    """
     # Small prime-ish strides so consecutive cases are not correlated.
     t1 = 22200.0 + (i * 431) % 2600          # 22200 .. 24800, inside Feros_3
     g1 = 5.00 + ((i * 7) % 5) * 0.10         # 5.00 .. 5.40
     h1 = -2.60 + ((i * 3) % 6) * 0.25        # -2.60 .. -1.35
     out = {
-        "teff": t1, "logg": g1, "he": h1,
-        "vsini": 8.0 + (i % 5) * 6.0,        # 8 .. 32 km/s
-        "vrad": -60.0 + (i * 17) % 120,
+        "c1_teff": t1, "c1_logg": g1, "c1_he": h1,
+        "c1_vsini": 8.0 + (i % 5) * 6.0,     # 8 .. 32 km/s
+        "c1_vrad": -60.0 + (i * 17) % 120,
     }
     if kind == "binary":
         out.update({
-            "teff2": 26200.0 + (i * 313) % 2400,   # inside Feros_5
-            "logg2": 5.25 + ((i * 5) % 4) * 0.08,  # 5.25 .. 5.49
-            "he2": -2.30 + ((i * 11) % 5) * 0.25,  # -2.30 .. -1.30
-            "vsini2": 15.0 + (i % 4) * 10.0,
-            "vrad2": 40.0 - (i * 23) % 130,
-            "sur_ratio": 0.35 + (i % 5) * 0.15,    # 0.35 .. 0.95
+            "c2_teff": 26200.0 + (i * 313) % 2400,   # inside Feros_5
+            "c2_logg": 5.25 + ((i * 5) % 4) * 0.08,  # 5.25 .. 5.49
+            "c2_he": -2.30 + ((i * 11) % 5) * 0.25,  # -2.30 .. -1.30
+            "c2_vsini": 15.0 + (i % 4) * 10.0,
+            "c2_vrad": 40.0 - (i * 23) % 130,
+            "c2_sur_ratio": 0.35 + (i % 5) * 0.15,   # 0.35 .. 0.95
         })
     else:
         for e in FREE_ELEMENTS:
             # Interior of the element's own axis (all are 3 nodes wide).
-            out[e] = {"FE": -5.30, "SI": -5.20}[e] + ((i * 13) % 7) * 0.10
+            out[f"c1_{e}"] = (
+                {"FE": -5.30, "SI": -5.20}[e] + ((i * 13) % 7) * 0.10
+            )
     return out
 
 
@@ -107,20 +114,21 @@ def _generate(cfg, kind: str, i: int, out_dir: Path) -> dict | None:
     t = _truth_grid(kind, i)
     cmd = [str(gen), "-o", str(out_dir), "--base", base,
            "--grid", GRID_A, "--seed", str(90000 + i),
-           "--teff", str(t["teff"]), "--logg", str(t["logg"]),
-           "--he", str(t["he"]), "--vsini", str(t["vsini"]),
-           "--vrad", str(t["vrad"])]
+           "--teff", str(t["c1_teff"]), "--logg", str(t["c1_logg"]),
+           "--he", str(t["c1_he"]), "--vsini", str(t["c1_vsini"]),
+           "--vrad", str(t["c1_vrad"])]
     if kind == "binary":
         cmd += ["--grid2", GRID_B,
-                "--teff2", str(t["teff2"]), "--logg2", str(t["logg2"]),
-                "--he2", str(t["he2"]), "--vsini2", str(t["vsini2"]),
-                "--vrad2", str(t["vrad2"]), "--sur-ratio", str(t["sur_ratio"])]
+                "--teff2", str(t["c2_teff"]), "--logg2", str(t["c2_logg"]),
+                "--he2", str(t["c2_he"]), "--vsini2", str(t["c2_vsini"]),
+                "--vrad2", str(t["c2_vrad"]),
+                "--sur-ratio", str(t["c2_sur_ratio"])]
     # Every element is modelled, at its axis midpoint unless the case gives it
     # a truth value; the fit config below seeds the identical set.
     mids = _species_axes(cfg, GRID_A)
     for e, mid in mids.items():
         if kind != "binary" and e in FREE_ELEMENTS:
-            cmd += ["--abundance", f"{e}={t[e]}", "--fit-abundance", e]
+            cmd += ["--abundance", f"{e}={t[f'c1_{e}']}", "--fit-abundance", e]
         else:
             cmd += ["--abundance", f"{e}={mid}"]
 
@@ -193,12 +201,12 @@ def _component_initial(cfg, kind: str, truth: dict, species: list[str],
                 ent.append((sp, mid, True))         # modelled, frozen
         return tuple(ent)
 
-    comps.append(block(0, truth["teff"], truth["logg"], truth["he"],
-                       truth["vsini"], truth["vrad"]))
+    comps.append(block(0, truth["c1_teff"], truth["c1_logg"], truth["c1_he"],
+                       truth["c1_vsini"], truth["c1_vrad"]))
     if kind == "binary":
-        comps.append(block(1, truth["teff2"], truth["logg2"], truth["he2"],
-                           truth["vsini2"], truth["vrad2"],
-                           sur=truth["sur_ratio"]))
+        comps.append(block(1, truth["c2_teff"], truth["c2_logg"],
+                           truth["c2_he"], truth["c2_vsini"],
+                           truth["c2_vrad"], sur=truth["c2_sur_ratio"]))
     return tuple(comps)
 
 

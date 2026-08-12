@@ -1,13 +1,19 @@
 # GAEL regression tests: agreement with ISIS
 
-Two suites compare GAEL's fit results against reference fits produced by ISIS's
-`spectroscopy_automated`, which is the established code these fits are normally
-done with.
+These suites compare GAEL's fit results against reference fits produced by
+ISIS's `spectroscopy_automated`, which is the established code these fits are
+normally done with.
 
 | test | data | cases |
 |---|---|---|
 | `gael_vs_isis_mock` | mock spectra from `mock_data_generator` (true parameters known) | 100 single-spectrum + 100 joint 5-spectrum fits |
 | `gael_vs_isis_real` | real observed spectra from ASTRA's **RVVD** project | 100 single-spectrum + 100 joint 5-spectrum fits |
+| `gael_vs_isis_xshooter` | X-Shooter-like mocks (UVB + VIS) on the metal-bearing Feros grids | 12 abundance + 12 two-component fits |
+
+The sdB grids carry no element axes and one stellar component, so the first two
+suites cannot reach either feature. The X-Shooter suite exists for exactly
+those two: `metal` leaves Fe and Si free, `binary` fits two components on two
+different grids. See `gael_isis/xshooter.py` for what each holds fixed and why.
 
 Both codes are handed the **same** 3-column ASCII files and equivalent fit
 settings (grid, wavelength cut, masks, continuum anchors, initial guess, frozen
@@ -57,10 +63,49 @@ The cache is not committed (see `.gitignore`): mock spectra are regenerated
 from the model grid, so entries are only valid for a given grid version. Delete
 `tests/cache/` to force a full recomputation.
 
+## The patched ISIS (two-component cases only)
+
+Stock `spectroscopy_automated` **cannot run** a two-component fit with
+`auto_freeze_sur_ratio = 0`. `c2_detection_thres` is declared inside
+`if(ngrid==2 && auto_freeze_sur_ratio==1)` (`spectroscopy_automated.sl:1163`)
+but read at `:1738`, in a block guarded only by `if(ngrid>1)`; S-Lang hoists the
+declaration to function scope, so the name exists, is never assigned, and the
+comparison fails with
+
+```
+Binary operation between Array_Type and Undefined_Type failed
+stellar_isisscripts.sl:...:spectroscopy_automated:Type Mismatch
+```
+
+Leaving the qualifier at its default of 1 is not an alternative: at `:386-409`
+ISIS *deletes the second grid outright*, before fitting, whenever the seeded
+`c2_sur_ratio` is at or below `sur_ratio_thres = 5` — true of every physically
+sensible binary. ISIS would fit one component while GAEL fits two.
+
+So `gael_isis/isis_patch.py` derives a patched copy of the concatenated
+`stellar_isisscripts.sl` under `tests/cache/isis_patched/`, and runs those
+cases as `isis -i <generated rc> fit.sl`, whose init file loads `~/.isisrc` and
+then puts the copy first on the load path. **The ISIS installation is never
+modified.** The copy is keyed on the installed script's digest, so an ISIS
+update rebuilds it rather than going stale, and the substitutions are checked
+by match count — if the upstream lines have moved, the suite fails loudly
+instead of silently running something else.
+
+The patch itself is one line, hoisting the declaration next to
+`sur_ratio_thres` and leaving a plain assignment of the same constant behind,
+so it cannot change any run with `auto_freeze_sur_ratio = 1`. It is applied
+only to cases that cannot run without it (more than one component *and* the
+qualifier off), and only those cases carry `isis_patch` in their cache key —
+the two scopes are the same set, so no previously cached reference is
+invalidated.
+
 ## What is compared, and what is skipped
 
 Compared: **teff**, **logg**, **he** (tied across a case) and **vrad** (untied,
-one value per spectrum, so a 5-spectrum case contributes 5 samples).
+one value per spectrum, so a 5-spectrum case contributes 5 samples). The
+X-Shooter suites compare component-qualified names instead — `c1_teff`,
+`c1_FE`, `c1_SI` for `metal`, and `c1_*`, `c2_*` plus `c2_sur_ratio` for
+`binary` — since the parameter set is a property of the case.
 
 A case is skipped entirely when either code fails or drops a spectrum — the
 untied parameters are matched by index, so a dropped spectrum would misalign
@@ -139,6 +184,7 @@ machine without the full setup still gets a clean `ctest` run.
 |---|---|
 | `GAEL_TEST_GAEL_BIN`, `GAEL_TEST_MOCKGEN_BIN` | binaries (CMake passes these) |
 | `GAEL_TEST_ISIS` | ISIS binary |
+| `GAEL_TEST_ISIS_SCRIPTS` | `stellar_isisscripts.sl` (or its directory) to patch, if it is not on `~/.isisrc`'s load path |
 | `GAEL_TEST_GLOBAL_SETTINGS` | `global_settings.json` used for the GAEL runs |
 | `GAEL_TEST_ASTRA_DB` | ASTRA database with the real spectra |
 | `GAEL_TEST_CACHE` | cache root (default `tests/cache`) |
@@ -154,6 +200,7 @@ machine without the full setup still gets a clean `ctest` run.
 tests/
   test_mock_vs_isis.py     entry point: mock spectra
   test_real_vs_isis.py     entry point: real RVVD spectra
+  test_xshooter_vs_isis.py entry point: abundances and two-component fits
   tolerances.json          calibrated pass/fail thresholds
   manifests/               frozen real-spectra sample
   gael_isis/
@@ -161,6 +208,8 @@ tests/
     asd.py                 reader for ASTRA's .asd spectrum files
     jobs.py                Case/FitOutcome model shared by both backends
     isis_ref.py            fit.sl generation, execution, parsing, caching
+    isis_patch.py          patched stellar_isisscripts.sl for binary cases
+    xshooter.py            the metal and binary case definitions
     gael_run.py            GAEL CLI driver and fit_parameters.csv parsing
     selection.py           database queries and sample manifests
     mockdata.py            seeded mock_data_generator invocation
