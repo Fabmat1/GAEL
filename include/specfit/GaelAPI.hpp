@@ -1,5 +1,6 @@
 #pragma once
 #include "Types.hpp"
+#include "FitProgress.hpp"
 #include <array>
 #include <functional>
 #include <map>
@@ -17,7 +18,8 @@ enum class Status {
     InvalidInput,        // config was rejected before any work started
     PreprocessingFailed, // every spectrum got filtered/failed to load
     FitFailed,           // workflow threw during the LM/Powell stages
-    InternalError        // unexpected C++ exception
+    InternalError,       // unexpected C++ exception
+    Aborted              // the progress callback asked the fit to stop
 };
 
 // ---------- Global settings (one per GaelSession) -----------------------
@@ -318,9 +320,24 @@ public:
 
     void set_num_threads(int n);      // 0 = hardware_concurrency
 
-    // Optional progress callback: stage name + fractional progress [0,1]
-    using ProgressFn = std::function<void(const std::string& stage, double frac)>;
+    /*  Optional progress callback.  Called from the fitting thread, several
+     *  times a second while the fit runs: once per spectrum during
+     *  preprocessing, once per LM iteration inside every stage, and at each
+     *  phase boundary.  `ProgressReport::fraction` is a monotone estimate of
+     *  the share of the whole run -- continuum-jitter ensemble included --
+     *  that is done; see FitProgress.hpp for how it is arrived at.
+     *
+     *  Return false to ask the fit to stop.  It unwinds at the next LM
+     *  iteration boundary and run() returns a FitResult with
+     *  status == Status::Aborted and no parameters.                        */
+    using ProgressFn = ::specfit::ProgressFn;
     void set_progress_callback(ProgressFn cb);
+
+    /*  Convenience overload for consumers that only want a label and a
+     *  fraction, and never abort.                                          */
+    using SimpleProgressFn =
+        std::function<void(const std::string& stage, double frac)>;
+    void set_progress_callback(SimpleProgressFn cb);
 
     // Optional log-line callback
     using LogFn = std::function<void(const std::string& line)>;

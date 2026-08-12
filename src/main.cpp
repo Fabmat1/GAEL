@@ -269,7 +269,40 @@ int main(int argc, char **argv) {
         session.set_log_callback(
             [](const std::string &line) { std::cout << line << '\n'; });
 
+        /*  GAEL_PROGRESS=1 puts the phase-by-phase progress report on stderr,
+         *  one line per update, so it stays out of the piped stdout that the
+         *  test harness reads.  It is also how the tracker's calibration gets
+         *  checked against a real fit.                                      */
+        if (const char *p = std::getenv("GAEL_PROGRESS");
+            p && std::string(p) == "1") {
+            /*  GAEL_PROGRESS_ABORT_AFTER=N exercises the cancellation path
+             *  (the callback's return value) from the CLI: the fit stops at
+             *  the Nth report and run() comes back with Status::Aborted.   */
+            const char *a  = std::getenv("GAEL_PROGRESS_ABORT_AFTER");
+            const int abort_after = a ? std::atoi(a) : 0;
+            auto seen = std::make_shared<int>(0);
+
+            session.set_progress_callback(
+                [abort_after, seen](const specfit::ProgressReport &r) {
+                    std::cerr << "[progress] " << std::fixed
+                              << std::setw(6) << std::setprecision(2)
+                              << 100.0 * r.fraction << "%  "
+                              << std::setprecision(2) << r.elapsed_seconds
+                              << "s";
+                    if (r.eta_seconds >= 0.0)
+                        std::cerr << " (eta " << r.eta_seconds << "s)";
+                    std::cerr << "  " << r.phase;
+                    if (!r.detail.empty()) std::cerr << "  --  " << r.detail;
+                    std::cerr << '\n';
+                    return !(abort_after > 0 && ++*seen >= abort_after);
+                });
+        }
+
         auto result = session.run();
+        if (result.status == api::Status::Aborted) {
+            std::cerr << "Aborted: " << result.error_message << '\n';
+            return 2;
+        }
 
         /* ---- always emit fit_parameters.csv from the CLI ------------- */
         write_fit_parameters_csv(fi.output_path, result);

@@ -175,6 +175,7 @@ add_library(GAELcore
     src/ContinuumUtils.cpp
     src/Resolution.cpp
     src/Chi2Utils.cpp
+    src/FitProgress.cpp
     src/UnifiedFitWorkflow.cpp
     src/SpectrumLoaders.cpp
     src/GaelAPI.cpp

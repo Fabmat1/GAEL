@@ -14,6 +14,8 @@
 #include <Eigen/Dense>
 #include <chrono>
 #include <cstdlib>
+#include <iomanip>
+#include <sstream>
 #include <string>
 
 using Eigen::ArrayXd;
@@ -195,6 +197,74 @@ UnifiedFitWorkflow::param_limits(const ParamSpec& ps, int comp,
  *  has the same value everywhere, and an untied one (vrad) has never had a
  *  single value to report.
  * ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- *
+ *  Prior cost of one solve, in dataset-synthetic-spectrum evaluations.
+ *
+ *  Per LM iteration the cost function evaluates, for every dataset, one
+ *  synthetic spectrum for the candidate point, and -- on the iterations whose
+ *  step is accepted, roughly half of them -- one more per free stellar
+ *  parameter *name* per dataset.  (Whether a name is tied or untied does not
+ *  change that total: a tied parameter is one column reaching D datasets, an
+ *  untied one is D columns reaching one each.)  Continuum anchors and telluric
+ *  parameters cost a windowed spline / transmission evaluation rather than a
+ *  grid interpolation plus two convolutions, which is a small fraction of one;
+ *  they still dominate the continuum-only stage, so they are not dropped.
+ *
+ *  See FitProgress.hpp for why this is only a prior.
+ * ------------------------------------------------------------------------- */
+double UnifiedFitWorkflow::solve_cost(const std::set<std::string>& free_params,
+                                      int max_iterations) const
+{
+    constexpr double kAcceptedFraction = 0.5;   // measured: 448 of 930 steps
+    constexpr double kAnchorCost       = 0.05;  // spline eval / synthetic eval
+    constexpr double kTelluricCost     = 0.2;   // transmission / synthetic eval
+
+    const double D             = static_cast<double>(datasets_.size());
+    const bool   all_requested = free_params.count("all") > 0;
+
+    double free_names = 0.0;
+    for (int c = 0; c < static_cast<int>(model_.params.size()); ++c) {
+        const auto& frz = frozen_status_[static_cast<std::size_t>(c)];
+        for (const auto& ps : indexer_.params(c)) {
+            if (!(all_requested ||
+                  free_params.count("c" + std::to_string(c + 1) + "_" + ps.name)))
+                continue;
+            const auto it = frz.find(ps.name);
+            if (it != frz.end() && it->second) continue;
+            if (ps.kind == ParamKind::SurRatio && c == 0) continue;
+            free_names += 1.0;
+        }
+    }
+
+    double jacobian = free_names * D;
+    if (free_params.count("continuum"))
+        jacobian += kAnchorCost * n_continuum_params();
+    if (all_requested || free_params.count("telluric"))
+        jacobian += kTelluricCost * n_telluric_;
+
+    const double per_iteration = D + kAcceptedFraction * (D + jacobian);
+    return std::max(1.0, max_iterations * per_iteration);
+}
+
+double UnifiedFitWorkflow::estimated_quick_refit_cost(int max_iterations) const
+{
+    return solve_cost({ "continuum", "telluric" }, 100)
+         + solve_cost({ "all", "continuum" }, max_iterations);
+}
+
+void UnifiedFitWorkflow::enter_phase(int id, const std::string& detail)
+{
+    active_phase_ = id;
+    if (config_.progress && id >= 0) config_.progress->begin(id, detail);
+}
+
+void UnifiedFitWorkflow::leave_phase()
+{
+    if (config_.progress && active_phase_ >= 0)
+        config_.progress->end(active_phase_);
+    active_phase_ = -1;
+}
+
 void UnifiedFitWorkflow::sync_model_params()
 {
     for (int c = 0; c < static_cast<int>(model_.params.size()); ++c)
@@ -442,7 +512,27 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
     lm_opt.max_iterations = max_iterations;
     lm_opt.verbose        = false;
     lm_opt.column_blocks  = std::move(col_blocks);
-    
+
+    /*  Sub-progress of the phase this stage belongs to; see
+     *  lm_iteration_progress() for why it is not it/max_iterations.       */
+    if (config_.progress && config_.progress->active() && active_phase_ >= 0) {
+        const int   n_free = static_cast<int>(
+            std::count(free_mask.begin(), free_mask.end(), true));
+        FitProgressTracker* pr = config_.progress;
+        lm_opt.iteration_callback =
+            [pr, n_free](int it, int max_it, double chi2) {
+                std::ostringstream d;
+                d << "LM iteration " << it << '/' << max_it
+                  << "  |  " << n_free << " free parameters";
+                if (std::isfinite(chi2))
+                    d << "  |  chi2 = " << std::fixed << std::setprecision(1)
+                      << chi2;
+                pr->update(lm_iteration_progress(it, max_it),
+                           d.str(), it, max_it, chi2);
+                return !pr->aborted();
+            };
+    }
+
     // Create a wrapper functor for the cost function
     auto cost_functor = [&cost](const Eigen::VectorXd& p,
                                 Eigen::VectorXd* r,
@@ -519,10 +609,14 @@ void UnifiedFitWorkflow::solve_stage(const std::set<std::string>& free_params,
     }
 
     Eigen::Map<Eigen::VectorXd>(unified_params_.data(), Npar) = x;
-    
+
     if (config_.on_stage_complete)
         config_.on_stage_complete(dbg_stage_counter, *this);
     ++dbg_stage_counter;
+
+    /*  An abort request is honoured here, on a consistent state: x holds the
+     *  last accepted point and it has just been written back.              */
+    if (config_.progress) config_.progress->throw_if_aborted();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -535,16 +629,19 @@ void UnifiedFitWorkflow::stage1_continuum_only() {
     solve_stage( { "continuum", "telluric" }, 100 );
 }
 
-void UnifiedFitWorkflow::stage2_continuum_vrad() {
+std::set<std::string> UnifiedFitWorkflow::free_params_stage2() const {
     std::set<std::string> fp = { "continuum" };
     for (std::size_t c = 0; c < model_.params.size(); ++c)
         fp.insert("c"+std::to_string(c+1)+"_vrad");
+    return fp;
+}
 
-    solve_stage(fp, 100);
+void UnifiedFitWorkflow::stage2_continuum_vrad() {
+    solve_stage(free_params_stage2(), 100);
 }
 
 
-void UnifiedFitWorkflow::stage3_continuum_vrad_teff_logg_z() {
+std::set<std::string> UnifiedFitWorkflow::free_params_stage3() const {
     std::set<std::string> fp = { "continuum" };
     for (std::size_t c = 0; c < model_.params.size(); ++c) {
         fp.insert("c"+std::to_string(c+1)+"_vrad");
@@ -552,7 +649,11 @@ void UnifiedFitWorkflow::stage3_continuum_vrad_teff_logg_z() {
         fp.insert("c"+std::to_string(c+1)+"_logg");
         fp.insert("c"+std::to_string(c+1)+"_z");
     }
-    solve_stage(fp, 150);
+    return fp;
+}
+
+void UnifiedFitWorkflow::stage3_continuum_vrad_teff_logg_z() {
+    solve_stage(free_params_stage3(), 150);
 }
 
 
@@ -564,10 +665,37 @@ void UnifiedFitWorkflow::stage4_full(bool add_powell) {
 
 void UnifiedFitWorkflow::quick_refit(int max_iterations)
 {
+    const std::set<std::string> fp_cont = { "continuum", "telluric" };
+    const std::set<std::string> fp_all  = { "all", "continuum" };
+
+    int ph_cont = -1, ph_joint = -1;
+    if (config_.progress && config_.progress->active() &&
+        config_.progress_phase >= 0) {
+        const std::string& pre = config_.progress_label;
+        /*  Their own calibration bucket, not the main fit's "solve": a warm
+         *  refit starts near the solution but with a freshly re-seeded
+         *  continuum, and measures ~2x the seconds per unit of prior that
+         *  the ladder's stages do (they converge far inside their iteration
+         *  budget, these run most of the way through theirs).  Sharing a
+         *  bucket made the ensemble's estimate ~40 % short.               */
+        const auto ids = config_.progress->expand(
+            config_.progress_phase,
+            { { "refit", pre + " \xc2\xb7 continuum",
+                solve_cost(fp_cont, 100) },
+              { "refit", pre + " \xc2\xb7 joint solve",
+                solve_cost(fp_all, max_iterations) } });
+        if (ids.size() == 2) { ph_cont = ids[0]; ph_joint = ids[1]; }
+    }
+
     // Continuum is freshly re-seeded for the jittered anchors; settle it at the
     // (warm-started) stellar values, then do one joint continuum+stellar solve.
+    enter_phase(ph_cont);
     stage1_continuum_only();
-    solve_stage({ "all", "continuum" }, max_iterations, /*add_powell=*/false);
+    leave_phase();
+
+    enter_phase(ph_joint);
+    solve_stage(fp_all, max_iterations, /*add_powell=*/false);
+    leave_phase();
 
     // propagate to model.params so callers reading the model see the refit
     sync_model_params();
@@ -622,25 +750,34 @@ void UnifiedFitWorkflow::stage5_auto_freeze_vsini()
             to_freeze.push_back(c);
     }
 
-    if (!to_freeze.empty()) {
-        std::cout << "[Stage 5] Freezing vsini = 0 km/s (below threshold of "
-                  << std::fixed << std::setprecision(3) << vsini_thres
-                  << " km/s)\n";
-
-        for (int c : to_freeze) {
-            frozen_status_[c]["vsini"] = true;
-
-            // Set vsini to 0 for all datasets
-            for (size_t d = 0; d < datasets_.size(); ++d) {
-                unified_params_[indexer_.index_of(c, static_cast<int>(d),
-                                                  "vsini")] = 0.0;
-            }
-        }
-
-        // Run a fit with vsini frozen
-        std::set<std::string> fp = { "all", "continuum" };
-        solve_stage(fp, 100);
+    if (to_freeze.empty()) {
+        /*  Nothing to refit: retire the phase so its prior stops counting
+         *  against the time still to come.                                */
+        if (config_.progress) config_.progress->drop(phase_.stage5);
+        return;
     }
+
+    std::cout << "[Stage 5] Freezing vsini = 0 km/s (below threshold of "
+              << std::fixed << std::setprecision(3) << vsini_thres
+              << " km/s)\n";
+
+    for (int c : to_freeze) {
+        frozen_status_[c]["vsini"] = true;
+
+        // Set vsini to 0 for all datasets
+        for (size_t d = 0; d < datasets_.size(); ++d) {
+            unified_params_[indexer_.index_of(c, static_cast<int>(d),
+                                              "vsini")] = 0.0;
+        }
+    }
+
+    // Run a fit with vsini frozen
+    std::set<std::string> fp = { "all", "continuum" };
+    if (config_.progress)
+        config_.progress->set_weight(phase_.stage5, solve_cost(fp, 100));
+    enter_phase(phase_.stage5, "refitting with vsini frozen");
+    solve_stage(fp, 100);
+    leave_phase();
 }
 
 
@@ -727,8 +864,17 @@ void UnifiedFitWorkflow::stage5b_auto_freeze_sur_ratio()
         froze_any = true;
     }
 
-    if (froze_any)
-        solve_stage({ "all", "continuum" }, 100);
+    if (!froze_any) {
+        if (config_.progress) config_.progress->drop(phase_.stage5b);
+        return;
+    }
+
+    const std::set<std::string> fp = { "all", "continuum" };
+    if (config_.progress)
+        config_.progress->set_weight(phase_.stage5b, solve_cost(fp, 100));
+    enter_phase(phase_.stage5b, "refitting without the retired component");
+    solve_stage(fp, 100);
+    leave_phase();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -757,6 +903,16 @@ void UnifiedFitWorkflow::stage6_rescale_and_reject()
     {
         weights_changed = false;
         ++pass;
+
+        /*  One tracker phase per pass: the loop normally stops early, and a
+         *  pass that never runs has its prior dropped below, so the bar
+         *  moves on instead of waiting out a budget nobody spent.         */
+        const int pass_phase =
+            (pass - 1) < static_cast<int>(phase_.stage6.size())
+                ? phase_.stage6[static_cast<std::size_t>(pass - 1)]
+                : -1;
+        enter_phase(pass_phase,
+                    "rescaling sigma from the local scatter, rejecting outliers");
 
         /* =========   data set loop  (parallel if requested)   ========= */
         #pragma omp parallel for schedule(dynamic) if(nthreads_>1)
@@ -871,7 +1027,15 @@ void UnifiedFitWorkflow::stage6_rescale_and_reject()
         /* -------- one warm-started LM step with new weights ----------- */
         std::set<std::string> fp = { "all", "continuum" };
         solve_stage(fp, 3);                          /* ≤ 3 LM iteration */
+        leave_phase();
     }  /* =====================   end outer loop   ======================= */
+
+    /*  Passes the loop never needed cost nothing; take their priors out of
+     *  the estimate rather than leave the bar waiting for them.           */
+    if (config_.progress)
+        for (std::size_t k = static_cast<std::size_t>(pass);
+             k < phase_.stage6.size(); ++k)
+            config_.progress->drop(phase_.stage6[k]);
 
     if (config_.verbose)
         std::cout << "[IterNoise] passes: " << pass << '\n';
@@ -885,7 +1049,9 @@ void UnifiedFitWorkflow::stage7_final() {
 
     // Do initial full fit
     std::cout << "[Stage 7] Final fit ...\n";
+    enter_phase(phase_.stage7);
     stage4_full();
+    leave_phase();
 
     // Check for boundary parameters
     bool any_at_boundary = false;
@@ -928,21 +1094,33 @@ void UnifiedFitWorkflow::stage7_final() {
     }
     
     // If any parameters at boundary, freeze them and refit
-    if (any_at_boundary) {
-        std::cout << "\n[Stage 7] Detected " << boundary_params.size() 
-                  << " parameter(s) at grid boundaries.\n";
-        std::cout << "[Stage 7] Freezing boundary parameters and refitting...\n";
-        
-        // Freeze all boundary parameters
-        for (const auto& [comp, param_name] : boundary_params) {
-            frozen_status_[comp][param_name] = true;
-            std::cout << "  Frozen: Component " << (comp+1) 
-                      << " " << param_name << "\n";
-        }
-        
-        stage4_full();  // with Powell refinement
+    if (!any_at_boundary) {
+        if (config_.progress) config_.progress->drop(phase_.stage7_boundary);
+        return;
     }
-}    
+
+    std::cout << "\n[Stage 7] Detected " << boundary_params.size()
+              << " parameter(s) at grid boundaries.\n";
+    std::cout << "[Stage 7] Freezing boundary parameters and refitting...\n";
+
+    // Freeze all boundary parameters
+    for (const auto& [comp, param_name] : boundary_params) {
+        frozen_status_[comp][param_name] = true;
+        std::cout << "  Frozen: Component " << (comp+1)
+                  << " " << param_name << "\n";
+    }
+
+    if (config_.progress)
+        config_.progress->set_weight(
+            phase_.stage7_boundary,
+            solve_cost({ "all", "continuum" }, 200));
+    enter_phase(phase_.stage7_boundary,
+                "refitting with " + std::to_string(boundary_params.size()) +
+                " boundary parameter(s) frozen");
+    stage4_full();  // with Powell refinement
+    leave_phase();
+}
+
 
 
 void UnifiedFitWorkflow::report_boundary_parameters() const {
@@ -994,6 +1172,97 @@ void UnifiedFitWorkflow::report_boundary_parameters() const {
 /* ------------------------------------------------------------------------- */
 /*  public “run” orchestrator                                                */
 /* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- *
+ *  Turn the session's single "fit" placeholder into this run's stage ladder.
+ *
+ *  Every stage that *might* run gets a phase, conditionals included: a stage
+ *  that turns out to be skipped drops its own prior (see stage 5, 5b, 6, 7),
+ *  which is cheap, whereas a stage that appeared out of nowhere would have to
+ *  push the bar backwards.  The priors for the conditional refits are damped,
+ *  since most fits do not need them.
+ * ------------------------------------------------------------------------- */
+void UnifiedFitWorkflow::plan_stages(bool do_1, bool do_23, bool do_6)
+{
+    phase_ = StagePhases{};
+
+    FitProgressTracker* pr = config_.progress;
+    if (!pr || !pr->active() || config_.progress_phase < 0) return;
+
+    /*  Share of a full solve that a conditional refit is worth up front.
+     *  Wrong in both directions on any single fit; the tracker re-weights
+     *  what is left from the clock as soon as the first phase completes.  */
+    constexpr double kConditionalPrior = 0.35;
+
+    const std::set<std::string> fp_cont = { "continuum", "telluric" };
+    const std::set<std::string> fp_all  = { "all", "continuum" };
+
+    std::vector<FitProgressTracker::PhaseSpec> plan;
+    enum Slot { S1, S2, S3, S4, S5, S5B, S6, S7, S7B };
+    std::vector<std::pair<Slot,int>> slots;   // slot -> index into `plan`
+
+    auto push = [&](Slot s, std::string label, double weight) {
+        slots.emplace_back(s, static_cast<int>(plan.size()));
+        plan.push_back({ "solve", std::move(label), weight });
+    };
+
+    if (do_1)
+        push(S1, "Stage 1 \xc2\xb7 continuum pre-fit",
+             solve_cost(fp_cont, 100));
+    if (do_23) {
+        push(S2, "Stage 2 \xc2\xb7 continuum + v_rad",
+             solve_cost(free_params_stage2(), 100));
+        push(S3, "Stage 3 \xc2\xb7 continuum + v_rad + T_eff + log g + [M/H]",
+             solve_cost(free_params_stage3(), 150));
+    }
+    push(S4, "Stage 4 \xc2\xb7 first full fit", solve_cost(fp_all, 200));
+    push(S5, "Stage 5 \xc2\xb7 refit with v sin i frozen",
+         kConditionalPrior * solve_cost(fp_all, 100));
+    if (config_.auto_freeze_sur_ratio && model_.params.size() > 1)
+        push(S5B, "Stage 5b \xc2\xb7 refit without the retired component",
+             kConditionalPrior * solve_cost(fp_all, 100));
+
+    /*  Stage 6 is one phase per IRLS pass.  Each pass rescales sigma from the
+     *  local scatter of every spectrum (a model evaluation apiece, plus the
+     *  box filter) and then takes at most three warm LM steps.  The loop
+     *  usually runs its full budget, so these are not damped.              */
+    const int n_pass = do_6 ? std::max(0, config_.nit_noise_max) : 0;
+    const double pass_weight = 2.0 * static_cast<double>(datasets_.size())
+                             + solve_cost(fp_all, 3);
+    std::vector<int> pass_plan_idx;
+    for (int k = 0; k < n_pass; ++k) {
+        pass_plan_idx.push_back(static_cast<int>(plan.size()));
+        plan.push_back({ "noise_pass",
+                         "Stage 6 \xc2\xb7 noise rescaling, pass " +
+                             std::to_string(k + 1) + '/' +
+                             std::to_string(n_pass),
+                         pass_weight });
+    }
+
+    push(S7,  "Stage 7 \xc2\xb7 final fit", solve_cost(fp_all, 200));
+    push(S7B, "Stage 7 \xc2\xb7 refit with boundary parameters frozen",
+         kConditionalPrior * solve_cost(fp_all, 200));
+
+    const std::vector<int> ids = pr->expand(config_.progress_phase, plan);
+    if (ids.size() != plan.size()) return;      // placeholder had gone
+
+    for (const auto& [slot, i] : slots) {
+        const int id = ids[static_cast<std::size_t>(i)];
+        switch (slot) {
+            case S1:  phase_.stage1 = id; break;
+            case S2:  phase_.stage2 = id; break;
+            case S3:  phase_.stage3 = id; break;
+            case S4:  phase_.stage4 = id; break;
+            case S5:  phase_.stage5 = id; break;
+            case S5B: phase_.stage5b = id; break;
+            case S7:  phase_.stage7 = id; break;
+            case S7B: phase_.stage7_boundary = id; break;
+            case S6:  break;                    // handled below
+        }
+    }
+    for (int i : pass_plan_idx)
+        phase_.stage6.push_back(ids[static_cast<std::size_t>(i)]);
+}
+
 void UnifiedFitWorkflow::run()
 {
     const std::string variant = stage_variant();
@@ -1024,12 +1293,26 @@ void UnifiedFitWorkflow::run()
     if (timing)
         std::cout << "[stage-timing] variant=" << variant << '\n';
 
-    if (do_1) { std::cout << "[Stage 1] Continuum Fit ...\n";   stage1_continuum_only(); mark("stage1"); }
-    if (do_23) {
-        std::cout << "[Stage 2] Fitting Continuum + v_rad ...\n"; stage2_continuum_vrad(); mark("stage2");
-        std::cout << "[Stage 3] Fitting Continuum + v_rad + T_eff + log(g) + [M/H] ...\n"; stage3_continuum_vrad_teff_logg_z(); mark("stage3");
+    plan_stages(do_1, do_23, do_6);
+
+    if (do_1) {
+        std::cout << "[Stage 1] Continuum Fit ...\n";
+        enter_phase(phase_.stage1); stage1_continuum_only(); leave_phase();
+        mark("stage1");
     }
-    std::cout << "[Stage 4] First Full Fit ...\n"; stage4_full(); mark("stage4");
+    if (do_23) {
+        std::cout << "[Stage 2] Fitting Continuum + v_rad ...\n";
+        enter_phase(phase_.stage2); stage2_continuum_vrad(); leave_phase();
+        mark("stage2");
+        std::cout << "[Stage 3] Fitting Continuum + v_rad + T_eff + log(g) + [M/H] ...\n";
+        enter_phase(phase_.stage3); stage3_continuum_vrad_teff_logg_z(); leave_phase();
+        mark("stage3");
+    }
+    std::cout << "[Stage 4] First Full Fit ...\n";
+    enter_phase(phase_.stage4); stage4_full(); leave_phase();
+    mark("stage4");
+    /*  Stages 5, 5b, 6 and 7 own more than one phase between them, or own a
+     *  phase that only sometimes runs, so each drives the tracker itself.  */
     std::cout << "[Stage 5] Auto-freeze vsini if unmeasurable ...\n"; stage5_auto_freeze_vsini(); mark("stage5");
     if (config_.auto_freeze_sur_ratio && model_.params.size() > 1) {
         std::cout << "[Stage 5b] Auto-freeze undetected components ...\n";

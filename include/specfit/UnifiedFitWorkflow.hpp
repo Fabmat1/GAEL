@@ -2,6 +2,7 @@
 #pragma once
 #include "Types.hpp"
 #include "CommonTypes.hpp"
+#include "FitProgress.hpp"
 #include "ModelGrid.hpp"
 #include "SimpleLM.hpp"
 #include <vector>
@@ -48,6 +49,18 @@ public:
         // Implementation-defined usage: the CLI hooks MultiPanelPlotter here.
         std::function<void(int stage_index,
                         const UnifiedFitWorkflow& wf)> on_stage_complete;
+
+        /*  Where to report progress, and which phase of that tracker's plan
+         *  this workflow owns.  run() / quick_refit() expand that one phase
+         *  into their own ladder, so the session does not have to know what
+         *  the ladder looks like.  Null tracker == no reporting; the
+         *  workflow is otherwise unchanged.  Not owned.                    */
+        FitProgressTracker* progress       = nullptr;
+        int                 progress_phase = -1;
+        /*  Prefix for the phase labels this workflow creates, so that a
+         *  warm refit run as part of an ensemble can say which one it is.
+         *  Empty for the main fit, whose stage names stand on their own.  */
+        std::string         progress_label;
     };
 
     UnifiedFitWorkflow(std::vector<DataSet>& datasets,
@@ -63,6 +76,12 @@ public:
     // joint continuum+stellar solve. Skips the progressive stages, the
     // iterative-noise/outlier rejection, vsini auto-freeze, and Powell.
     void quick_refit(int max_iterations = 60);
+
+    /*  Prior cost of one quick_refit(), in the same arbitrary units the
+     *  progress tracker's phase weights use.  Lets the caller of an ensemble
+     *  of warm refits weight them against the main fit before any of them
+     *  has run; see FitProgress.hpp.                                       */
+    double estimated_quick_refit_cost(int max_iterations = 60) const;
 
     Vector get_model_for_dataset(std::size_t dataset_idx) const;
 
@@ -112,6 +131,11 @@ private:
     void stage1_continuum_only();
     void stage2_continuum_vrad();
     void stage3_continuum_vrad_teff_logg_z();
+
+    /*  The free-parameter sets of stages 2 and 3, so that the stage and its
+     *  cost estimate cannot drift apart.                                   */
+    std::set<std::string> free_params_stage2() const;
+    std::set<std::string> free_params_stage3() const;
     void stage4_full(bool add_powell = false);
     void stage5_auto_freeze_vsini();
     void stage5b_auto_freeze_sur_ratio();
@@ -120,6 +144,33 @@ private:
     
     void report_boundary_parameters() const;
     double chi2_current() const;      //  <──  new
+
+    /* ---- progress bookkeeping ---------------------------------------- *
+     *  Prior cost of one solve_stage() call, in "dataset-synthetic-spectrum
+     *  evaluations": the unit the fit actually spends its time in.  Used
+     *  only to seed FitProgressTracker's phase weights, which it then
+     *  recalibrates against the clock -- so this has to get the *ordering*
+     *  of the stages right, not their absolute cost.                      */
+    double solve_cost(const std::set<std::string>& free_params,
+                      int max_iterations) const;
+
+    /*  Turn the tracker's single placeholder phase into this run's ladder,
+     *  filling phase_.  A no-op when there is no tracker.                  */
+    void plan_stages(bool do_1, bool do_23, bool do_6);
+
+    /*  Enter/leave the tracker phase that the stages below report into.  */
+    void enter_phase(int id, const std::string& detail = {});
+    void leave_phase();
+
+    /*  Phase ids handed out by run() / quick_refit(); -1 when the tracker is
+     *  inert or the phase does not apply to this run.                     */
+    struct StagePhases {
+        int stage1 = -1, stage2 = -1, stage3 = -1, stage4 = -1;
+        int stage5 = -1, stage5b = -1;
+        std::vector<int> stage6;
+        int stage7 = -1, stage7_boundary = -1;
+    } phase_;
+    int active_phase_ = -1;
 
     /*  Grid coverage intersected over every component's grid. */
     ModelGrid::ParameterBounds grid_bounds() const;

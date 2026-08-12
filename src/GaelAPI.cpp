@@ -135,6 +135,15 @@ void GaelSession::set_global_settings(const GlobalSettings& gs) { impl_->gs = gs
 void GaelSession::set_fit_input     (const FitInput& fi)        { impl_->fi = fi; }
 void GaelSession::set_num_threads(int n)                        { impl_->nthreads = n; }
 void GaelSession::set_progress_callback(ProgressFn cb)          { impl_->progress = std::move(cb); }
+
+void GaelSession::set_progress_callback(SimpleProgressFn cb)
+{
+    if (!cb) { impl_->progress = {}; return; }
+    impl_->progress = [cb = std::move(cb)](const ProgressReport& r) {
+        cb(r.phase, r.fraction);
+        return true;                       // this overload cannot abort
+    };
+}
 void GaelSession::set_log_callback(LogFn cb)                    { impl_->logger  = std::move(cb); }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +396,19 @@ void reanchor(DataSet& ds, const std::vector<std::array<double,3>>& intervals)
 
 FitResult GaelSession::run()
 {
+    try {
+        return run_impl();
+    } catch (const ::specfit::FitAborted&) {
+        FitResult R;
+        R.status        = Status::Aborted;
+        R.error_message = "fit aborted on request";
+        if (impl_->logger) impl_->logger("fit aborted on request");
+        return R;
+    }
+}
+
+FitResult GaelSession::run_impl()
+{
     const auto& gs = impl_->gs;
     const auto& fi = impl_->fi;
 
@@ -399,6 +421,51 @@ FitResult GaelSession::run()
     auto log = [&](const std::string& s){ if (impl_->logger) impl_->logger(s); };
 
     FitResult R;
+
+    /* ---- progress plan --------------------------------------------------- *
+     *  Three top-level phases: read the spectra, run the fit, run the
+     *  continuum-jitter ensemble.  The middle one is a placeholder that
+     *  UnifiedFitWorkflow::run() expands into its own stage ladder, and the
+     *  ensemble is one phase per refit so that the first refit's measured
+     *  cost predicts the rest.  Priors here are deliberately crude; the
+     *  tracker recalibrates them against the clock (see FitProgress.hpp).  */
+    ::specfit::FitProgressTracker progress(impl_->progress);
+
+    int n_input_files = 0;
+    for (const auto& obs : fi.observations)
+        n_input_files += static_cast<int>(obs.files.size());
+
+    /*  The fit's own priors need the datasets, which do not exist yet, so
+     *  these are per-spectrum rules of thumb in the same units
+     *  UnifiedFitWorkflow::solve_cost uses (dataset-synthetic-spectrum
+     *  evaluations).  They are replaced by the real estimates the moment the
+     *  workflow exists -- the fit phase by being expanded into the stage
+     *  ladder, the refits by set_weight below.
+     *
+     *  They still have to be roughly right, because they are what the bar
+     *  divides by while the spectra are being read: leaving the fit at a
+     *  nominal weight of 1 made a slow read (large files, network storage)
+     *  climb past 70 % before a single stage had started.                  */
+    constexpr double kFileWeight       = 10.0;    // load, rebin, seed anchors
+    constexpr double kFitPriorPerFile  = 3000.0;  // whole stage ladder
+    constexpr double kRefitPriorPerFile = 800.0;  // one warm refit
+
+    const int n_jitter = std::max(0, gs.cont_jitter_K);
+    const double files = std::max(1, n_input_files);
+
+    const int pre_phase = progress.add(
+        { "preprocess", "Reading spectra", kFileWeight * files });
+    const int fit_phase = progress.add(
+        { "solve", "Fitting", kFitPriorPerFile * files });
+    std::vector<int> jitter_phases;
+    for (int k = 0; k < n_jitter; ++k)
+        jitter_phases.push_back(progress.add(
+            { "jitter",
+              "Continuum jitter refit " + std::to_string(k + 1) + '/' +
+                  std::to_string(n_jitter),
+              kRefitPriorPerFile * files }));
+
+    progress.begin(pre_phase, "loading model grids");
 
     // ---- build grids & initial params ---------------------------------------
     /*  More than one grid path == more than one stellar component.  ISIS's
@@ -475,8 +542,16 @@ FitResult GaelSession::run()
     std::vector<DataSet> datasets;
     // anchor intervals per accepted dataset (for the continuum-jitter ensemble)
     std::vector<std::vector<std::array<double,3>>> ds_intervals;
+    int n_done = 0;
     for (const auto& obs : fi.observations) {
         for (const auto& f : obs.files) {
+            progress.update(
+                static_cast<double>(n_done) / std::max(1, n_input_files),
+                "reading " + std::to_string(n_done + 1) + '/' +
+                    std::to_string(n_input_files) + "  |  " +
+                    std::filesystem::path(f.filename).filename().string());
+            ++n_done;
+
             DataSet ds;
             std::string why;
             if (preprocess_one(f, obs, gs, ds, why)) {
@@ -491,6 +566,8 @@ FitResult GaelSession::run()
     }
     if (datasets.empty())
         throw std::runtime_error("No spectra passed the quality filters");
+
+    progress.update(1.0, "preparing the fit");
 
     /* ---- telluric library, shared by every spectrum that fits one ------ */
     if (std::any_of(datasets.begin(), datasets.end(),
@@ -541,10 +618,21 @@ FitResult GaelSession::run()
     wcfg.on_stage_complete = gs.on_stage_complete;
 
 
+    wcfg.progress          = &progress;
+    wcfg.progress_phase    = fit_phase;
+
     ::specfit::UnifiedFitWorkflow wf(datasets, model, wcfg, frozen, nt);
-    if (impl_->progress) impl_->progress("fitting", 0.0);
+
+    /*  Now that the datasets and the free-parameter set are known, replace
+     *  the placeholder priors of the jitter refits with the workflow's own
+     *  cost estimate.  Whether that estimate is any good barely matters
+     *  after refit 1 has been timed, but it is what the bar shows during
+     *  the main fit, which on a multi-spectrum job is the smaller half.   */
+    for (int id : jitter_phases)
+        progress.set_weight(id, wf.estimated_quick_refit_cost());
+
+    progress.end(pre_phase);
     wf.run();
-    if (impl_->progress) impl_->progress("fitting", 1.0);
 
     // ---- raw parameter vector ----------------------------------------------
     R.raw_params        = wf.get_parameters();
@@ -660,6 +748,9 @@ FitResult GaelSession::run()
     // solution; each refit only re-seats the continuum at jittered anchors and
     // does a short continuum+stellar solve (no progressive stages, no
     // iterative-noise rejection, no Powell). Far cheaper than a full re-fit.
+    if (!(gs.cont_jitter_K > 0 && !R.components.empty()))
+        for (int id : jitter_phases) progress.drop(id);
+
     if (gs.cont_jitter_K > 0 && !R.components.empty()) {
         /*  acc[c][p][d] collects one component's parameter p over the
          *  ensemble, per dataset for the untied ones.  Sized from the
@@ -706,6 +797,13 @@ FitResult GaelSession::run()
                     reanchor(datasets[d], iv);
                 }
                 model.params = warm;                       // warm start
+                wcfg.progress_phase =
+                    (static_cast<std::size_t>(k) < jitter_phases.size())
+                        ? jitter_phases[static_cast<std::size_t>(k)]
+                        : -1;
+                wcfg.progress_label = "Continuum jitter refit " +
+                                      std::to_string(k + 1) + '/' +
+                                      std::to_string(gs.cont_jitter_K);
                 ::specfit::UnifiedFitWorkflow jwf(datasets, model, wcfg, frozen_ens, nt);
                 jwf.quick_refit();
                 const auto p = jwf.get_parameters();
@@ -746,6 +844,7 @@ FitResult GaelSession::run()
         R.cont_jitter_K = gs.cont_jitter_K;
     }
 
+    progress.finish("Done");
     return R;
 }
 

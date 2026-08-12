@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <string>
 
 namespace specfit {
@@ -68,6 +69,19 @@ struct LMSolverOptions {
     int    max_consecutive_rejects = 12;     // give up when LM cannot progress
     bool   verbose               = false;    // chatty?
     std::vector<LMColumnBlock> column_blocks;   // empty == dense JᵀJ
+
+    /*  Called once per iteration, before the step is computed, with the
+     *  1-based iteration number, the iteration budget and the chi2 the
+     *  solver is currently sitting on.  Returning false stops the solve at
+     *  that boundary and sets LMSolverSummary::aborted; the parameter vector
+     *  is left at the last accepted point, so the caller can unwind on a
+     *  consistent state.  An empty callback costs one branch per iteration.
+     *
+     *  Iterations are the only structural handle a caller has on how far a
+     *  solve has got, which is what the fit's progress reporting is built
+     *  on -- see FitProgress.hpp.                                          */
+    std::function<bool(int iteration, int max_iterations, double chi2)>
+        iteration_callback;
 };
 
 /*  Defaults for the scaled tolerances above.  They are dimensionless, so --
@@ -82,6 +96,7 @@ struct LMSolverSummary {
     double initial_chi2       = 0.0;
     double final_chi2         = 0.0;
     bool   converged          = false;
+    bool   aborted            = false;         // iteration_callback said stop
     std::vector<double> param_uncertainties;   // 1-σ; 0 = fixed
 };
 
@@ -368,6 +383,15 @@ levenberg_marquardt(Functor&&                    func,
     /* --------------------------------------------------------------- */
     for (int it = 0; it < opt.max_iterations; ++it) {
         summ.iterations = it + 1;
+
+        /*  Progress / cancellation.  Reported before the step so a caller
+         *  sees iteration 1 of a long stage immediately rather than only
+         *  once the first Jacobian and candidate are done.                */
+        if (opt.iteration_callback &&
+            !opt.iteration_callback(summ.iterations, opt.max_iterations, chi2)) {
+            summ.aborted = true;
+            break;
+        }
 
         if (jacobian_is_stale) {
             if (opt.verbose)
