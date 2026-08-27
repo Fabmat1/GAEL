@@ -2,6 +2,7 @@
 #include "specfit/GaelAPI.hpp"
 #include "specfit/JsonUtils.hpp"
 #include "specfit/SpectrumCache.hpp"
+#include "specfit/MemoryBudget.hpp"
 #include "specfit/SyntheticModel.hpp"
 #include "specfit/UnifiedFitWorkflow.hpp"
 #include <algorithm>
@@ -218,6 +219,19 @@ int main(int argc, char **argv) {
             cxxopts::value<int>()->default_value("0"))(
             "cache-mem", "Model-spectrum cache budget in MiB",
             cxxopts::value<int>()->default_value("128"))(
+            /*  The ceiling on everything GAEL caches, as opposed to
+                --cache-mem, which is only the model-spectrum cache.  The two
+                weight tables underneath it are each capable of outgrowing it
+                by an order of magnitude -- a rotational table on a grid
+                sampled as finely as synthe is ~600 MB, and vsini is part of
+                its key, so a fit builds a fresh one per solver iteration.
+                Left alone this is read from MemAvailable and any cgroup
+                limit, which is what a container or a systemd scope will
+                actually kill the process at.                                */
+            "mem-budget",
+            "Ceiling on all GAEL caches, e.g. 4G or 2048M (default: auto from "
+            "available RAM)",
+            cxxopts::value<std::string>())(
             "debug-plots", "Write per-stage debug plots")(
             "no-plots", "Skip per-spectrum summary plots")(
             "cont-jitter",
@@ -231,6 +245,12 @@ int main(int argc, char **argv) {
             std::cout << opts.help() << '\n';
             return 0;
         }
+
+        /*  Before the caches, so that the first thing either of them asks for
+         *  is already measured against the right ceiling.                    */
+        if (cli.count("mem-budget"))
+            MemoryBudget::instance().set_total(
+                MemoryBudget::parse_size(cli["mem-budget"].as<std::string>()));
 
         SpectrumCache::instance().set_capacity(
             std::max(0, cli["cache-size"].as<int>()));

@@ -2,6 +2,7 @@
  *  src/SpectrumCache.cpp
  * ===================================================================== */
 #include "specfit/SpectrumCache.hpp"
+#include "specfit/MemoryBudget.hpp"
 
 #include <algorithm>
 
@@ -34,8 +35,18 @@ void SpectrumCache::set_memory_budget(std::size_t bytes)
 }
 void SpectrumCache::ensure_memory_budget(std::size_t bytes)
 {
+    /*  Raise towards `bytes`, but never past this cache's share of the
+     *  process-wide budget.  The caller derives its figure from the fit's
+     *  concurrency -- threads times (one model surface plus one synthetic per
+     *  arm) -- which is the right shape but has no idea what the machine has:
+     *  on the 8-arm UVES fit it asked for more than the two weight caches had
+     *  already taken, and nothing was arbitrating between the three.        */
+    const std::size_t ceiling = MemoryBudget::instance().model_spectra();
+    const std::size_t want    = std::min(bytes, ceiling);
+
     std::unique_lock lk(mtx_);
-    if (bytes > max_bytes_) max_bytes_ = bytes;
+    if (want > max_bytes_) max_bytes_ = want;
+    evict_if_needed_();
 }
 void SpectrumCache::clear()
 {
@@ -102,10 +113,17 @@ void SpectrumCache::evict_if_needed_()
     /*  Always keep at least one entry, whatever the budget says: evicting the
      *  spectrum a caller is about to use would turn the cache into a slow
      *  no-op rather than a small one.                                       */
+    /*  The tighter of what this cache was told to hold and what the process
+     *  can currently afford.  Re-read on every eviction pass rather than
+     *  stored, because the second of the two moves: MemoryBudget scales the
+     *  shares down when the machine runs short, and a cache that had cached
+     *  its own limit would go on holding memory through exactly the episode
+     *  the scaling exists for.                                             */
     auto over_budget = [&] {
         if (cache_.size() <= 1) return false;
         if (max_entries_ && cache_.size() > max_entries_) return true;
-        return bytes_ > max_bytes_;
+        return bytes_ > std::min(max_bytes_,
+                                 MemoryBudget::instance().model_spectra());
     };
 
     while (over_budget()) {
@@ -117,5 +135,7 @@ void SpectrumCache::evict_if_needed_()
         }
     }
 }
+
+std::size_t model_cache_bytes() { return SpectrumCache::instance().bytes_used(); }
 
 } // namespace specfit

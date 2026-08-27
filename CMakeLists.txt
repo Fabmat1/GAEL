@@ -159,6 +159,7 @@ find_library(CFITSIO_LIB cfitsio  REQUIRED)
 # ---------------------------------------------------------------------------
 add_library(GAELcore
     src/Spectrum.cpp
+    src/MemoryBudget.cpp
     src/SpectrumCache.cpp
     src/NyquistGrid.cpp
     src/Rebin.cpp

@@ -1,4 +1,5 @@
 #include "specfit/Resolution.hpp"
+#include "specfit/MemoryBudget.hpp"
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -138,8 +139,14 @@ static std::condition_variable   g_inflightCv;
  *  took 363 s; holding both took it to 71 s.  So the budget has to clear a
  *  realistic joint fit rather than a single spectrum.  These entries only
  *  ever get large on the metal path -- an HHE-only fit stays around 25 MB
- *  whatever this says.                                                       */
-static constexpr std::size_t MAX_CACHE_BYTES = 3ull << 30;
+ *  whatever this says.
+ *
+ *  The 3 GiB this used to name was picked against that X-Shooter case and
+ *  took no account of what else the process was holding, nor of the machine
+ *  it was on.  It now comes from MemoryBudget, which sizes the whole of
+ *  GAEL's caching from the memory actually available and hands this its
+ *  share, so the reasoning above still sets the *relative* weight while the
+ *  absolute figure follows the host.                                        */
 static constexpr std::size_t MAX_CACHE_SIZE  = 25;
 
 // Moves key to front (most recently used)
@@ -167,7 +174,7 @@ static WeightsPtr insert_cache_entry(const CacheKey& key,
 
     while (g_weightCache.size() > 1 &&
            (g_weightCache.size() > MAX_CACHE_SIZE ||
-            g_cacheBytes > MAX_CACHE_BYTES)) {
+            g_cacheBytes > MemoryBudget::instance().resolution_weights())) {
         const CacheKey victim = g_lruList.back();
         if (auto it = g_weightCache.find(victim); it != g_weightCache.end()) {
             g_cacheBytes -= std::min(g_cacheBytes, it->second.second);
@@ -478,6 +485,12 @@ void clear_weight_cache() {
 std::size_t get_cache_size() {
     std::lock_guard<std::mutex> lock(g_cacheMutex);
     return g_weightCache.size();
+}
+
+std::size_t resolution_cache_bytes()
+{
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    return g_cacheBytes;
 }
 
 } // namespace specfit

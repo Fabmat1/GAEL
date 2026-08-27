@@ -144,6 +144,24 @@ build_corners(const std::vector<const GridAxis*>& axes,
  *  a mutex member would make ModelGrid non-movable.                        */
 std::mutex g_lambda_mtx;
 
+/*  Which rotational routine the metal-free path uses; see the call site.
+ *
+ *  Off by default: the segment routine computes the same integral but sums
+ *  the duplicate kernel taps in a different order, so it does not reproduce
+ *  the numbers the ISIS comparison tests in tests/ were recorded against.
+ *  It is the cheaper of the two in both time and memory, so this is worth
+ *  turning on once a run of those tests says by how much the results move.
+ *
+ *  Read once -- it is consulted inside the corner loop.                    */
+bool use_rot_segments()
+{
+    static const bool v = [] {
+        const char* e = std::getenv("GAEL_ROT_SEGMENTS");
+        return e && std::string(e) == "1";
+    }();
+    return v;
+}
+
 } // namespace
 
 /* =================================================================== */
@@ -263,9 +281,34 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                              Vector rot_flux;
                              if (vsini >= 0.1){
                                 //std::cout << "[LoadSpec](fetch) Broadeningggg." << vsini << std::endl;
-                                 rot_flux = rotational_broaden(raw.lambda,
-                                                                    raw.flux,
-                                                                    vsini);
+                                /*  Two ways to compute the same integral.
+                                 *
+                                 *  The single-grid routine keeps a
+                                 *  (index, weight) pair per kernel tap in its
+                                 *  own std::vector per model pixel.  On a grid
+                                 *  as finely sampled as synthe's, with vsini at
+                                 *  100 km/s, the kernel spans ~220 pixels and
+                                 *  that table is ~600 MB -- and vsini is part of
+                                 *  its cache key, so the solver builds a fresh
+                                 *  one every iteration and uses it once.
+                                 *
+                                 *  The two-grid routine is the same integral
+                                 *  stored as one contiguous run of weights per
+                                 *  output point in a single flat array, built
+                                 *  with a monotone cursor instead of a binary
+                                 *  search and a sort per point.  It is what the
+                                 *  metal path already uses.  Accumulating the
+                                 *  duplicate taps rather than sort-then-merging
+                                 *  them reorders the floating-point sum, so this
+                                 *  is not bit-identical to what the ISIS
+                                 *  comparison tests were recorded against --
+                                 *  hence the switch rather than a replacement.
+                                 *  GAEL_ROT_SEGMENTS=0 restores the old path.  */
+                                 rot_flux = use_rot_segments()
+                                     ? rotational_broaden(raw.lambda, raw.flux,
+                                                          raw.lambda, vsini)
+                                     : rotational_broaden(raw.lambda, raw.flux,
+                                                          vsini);
                              }
                              else{
                                  rot_flux = raw.flux;

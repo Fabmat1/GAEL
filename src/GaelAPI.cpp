@@ -9,6 +9,7 @@
 #include "specfit/AkimaSpline.hpp"
 #include "specfit/ParameterIndexer.hpp"
 #include "specfit/SpectrumCache.hpp"
+#include "specfit/MemoryBudget.hpp"
 #include <Eigen/Core>
 #include <omp.h>
 #include <algorithm>
@@ -135,6 +136,11 @@ GaelSession& GaelSession::operator=(GaelSession&&) noexcept = default;
 void GaelSession::set_global_settings(const GlobalSettings& gs) { impl_->gs = gs; }
 void GaelSession::set_fit_input     (const FitInput& fi)        { impl_->fi = fi; }
 void GaelSession::set_num_threads(int n)                        { impl_->nthreads = n; }
+
+void GaelSession::set_memory_budget(std::size_t bytes)
+{
+    ::specfit::MemoryBudget::instance().set_total(bytes);
+}
 void GaelSession::set_progress_callback(ProgressFn cb)          { impl_->progress = std::move(cb); }
 
 void GaelSession::set_progress_callback(SimpleProgressFn cb)
@@ -641,6 +647,44 @@ FitResult GaelSession::run_impl()
         for (const auto& ds : datasets)
             obs_points += static_cast<std::size_t>(ds.obs.lambda.size());
 
+        /* ---- what the solver holds whatever the caches do ---------------- *
+         *  The caches can always be smaller at the price of rebuilding; these
+         *  arrays cannot, so they come off the budget before it is split.
+         *
+         *  The Jacobian dominates: one dense column per free parameter over
+         *  every fitted pixel.  The free-parameter count is not known here --
+         *  the workflow freezes and thaws through its stages -- so it is
+         *  bounded by what the layout can produce: the stellar parameters of
+         *  each component (tied, plus one per spectrum for the untied ones),
+         *  three telluric parameters per spectrum, and the continuum anchors.
+         *  Overestimating leaves the caches smaller than they could be, which
+         *  costs time; underestimating puts the machine in swap, which costs
+         *  the machine.                                                      */
+        std::size_t cont_anchors = 0;
+        for (const auto& ds : datasets)
+            cont_anchors += static_cast<std::size_t>(ds.cont_x.size());
+
+        const std::size_t n_ds = std::max<std::size_t>(1, datasets.size());
+        std::size_t n_stellar = 0;
+        for (const auto& c : model.grids)
+            n_stellar +=
+                (::specfit::canonical_params().size() + c.species().size()) *
+                n_ds;
+
+        const std::size_t n_params =
+            n_stellar + kNTelluricParams * n_ds + cont_anchors;
+
+        const std::size_t jacobian = obs_points * n_params * sizeof(double);
+        /*  Plus the residual vector each thread differences into, and the
+         *  three per-spectrum factors the Jacobian is built from.            */
+        const std::size_t scratch =
+            static_cast<std::size_t>(std::max(1, nt)) * obs_points *
+                sizeof(double) +
+            4 * obs_points * sizeof(double);
+
+        ::specfit::MemoryBudget::instance().set_reserved(jacobian + scratch);
+        log(::specfit::MemoryBudget::instance().describe());
+
         constexpr std::size_t kSurfaceBytes = 24ull << 20;   // ~1e6 pts x 3 x 8
         const std::size_t per_thread =
             kSurfaceBytes + obs_points * 3 * sizeof(double);
@@ -870,6 +914,9 @@ FitResult GaelSession::run_impl()
         }
         R.cont_jitter_K = gs.cont_jitter_K;
     }
+
+    if (auto stats = ::specfit::memory_stats_line(); !stats.empty())
+        log(stats);
 
     progress.finish("Done");
     return R;

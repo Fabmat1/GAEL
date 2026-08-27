@@ -320,6 +320,16 @@ public:
 
     void set_num_threads(int n);      // 0 = hardware_concurrency
 
+    /*  Ceiling on the memory GAEL's caches may hold, in bytes; 0 (the
+     *  default) sizes it from what the machine has free.
+     *
+     *  Worth setting from a host application, because the automatic figure is
+     *  read from MemAvailable and a GUI that is already holding the same
+     *  spectra is invisible to it -- GAEL would size itself as though the
+     *  memory the caller is using were free, and the two together would go
+     *  past what the machine has.                                           */
+    void set_memory_budget(std::size_t bytes);
+
     /*  Optional progress callback.  Called from the fitting thread, several
      *  times a second while the fit runs: once per spectrum during
      *  preprocessing, once per LM iteration inside every stage, and at each

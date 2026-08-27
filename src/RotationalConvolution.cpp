@@ -1,6 +1,8 @@
 // RotationalConvolution.cpp
 #include "specfit/RotationalConvolution.hpp"
+#include "specfit/MemoryBudget.hpp"
 #include <cmath>
+#include <vector>
 #include <algorithm>
 #include <numeric>
 #include <unordered_map>
@@ -32,6 +34,30 @@ struct RotationalWeights {
     
     // For each output point, store which input points contribute and their weights
     std::vector<std::vector<WeightEntry>> weights_per_point;
+
+    /*  What this table costs, for the cache budget.  It has to be measured
+     *  rather than estimated from the point count: the taps per point are set
+     *  by how many grid pixels the kernel spans, which is vsini/c divided by
+     *  the grid's step, and that ranges from two on a coarse grid at low vsini
+     *  to a few hundred on a finely sampled one at 100 km/s.  The same
+     *  25-entry cache is 40 MB in the first case and 15 GB in the second.
+     *
+     *  `capacity`, not `size`: these vectors are grown by push_back and the
+     *  slack is real memory.  The per-vector allocation header is counted too
+     *  -- with one vector per model pixel there are 230 000 of them.        */
+    std::size_t bytes() const
+    {
+        std::size_t b = weights_per_point.capacity() *
+                        sizeof(std::vector<WeightEntry>);
+        for (const auto& p : weights_per_point)
+            b += p.capacity() * sizeof(WeightEntry) +
+                 (p.capacity() ? kAllocHeader : 0);
+        return b;
+    }
+
+    /*  Glibc's malloc rounds up to 16 and keeps an 8-byte header; the exact
+     *  figure does not matter, only that per-point overhead is not free.    */
+    static constexpr std::size_t kAllocHeader = 16;
 };
 
 /* ------------- Cache key including wavelength grid signature --------- */
@@ -71,8 +97,23 @@ struct GridCacheKeyHash {
 /* ------------- LRU Cache implementation ------------------------------ */
 class LRUCache {
 private:
+    /*  An entry cap alone is not a memory limit.  These entries differ in size
+     *  by three orders of magnitude -- 40 MB for a 15 k-point HHE corner
+     *  spectrum, ~600 MB for one sampled at synthe's 3.3e-6 in ln(lambda)
+     *  with vsini at 100 km/s -- so twenty-five of them is either 1 GB or
+     *  15 GB depending on the grid, and the fit has no way to tell which it
+     *  is going to be.  vsini is part of the key and moves on every
+     *  Levenberg-Marquardt iteration, so the cache fills to its cap and then
+     *  stays there: on the 8-arm UVES fit this held nothing back until the
+     *  machine was in swap.  The entry cap stays as a cheap upper bound on
+     *  bookkeeping; the budget is what actually decides.                     */
     static constexpr std::size_t MAX_CACHE_SIZE = 25;
-    
+
+    /*  Bytes currently held, kept incrementally: RotationalWeights::bytes()
+     *  walks every point's vector, which is not something to do inside the
+     *  lock on each insert.                                                  */
+    std::size_t cache_bytes = 0;
+
     // List to maintain LRU order (most recently used at front)
     using KeyList = std::list<GridCacheKey>;
     KeyList lru_list;
@@ -83,27 +124,63 @@ private:
      *  eviction safe while a caller is still applying the weights.          */
     using WeightsPtr = std::shared_ptr<const RotationalWeights>;
 
-    // Map from key to (weights, iterator in lru_list)
-    std::unordered_map<GridCacheKey,
-                       std::pair<WeightsPtr, KeyList::iterator>,
-                       GridCacheKeyHash> cache_map;
-    
+    struct Node {
+        WeightsPtr        weights;
+        KeyList::iterator lru_pos;
+        std::size_t       bytes;
+    };
+
+    // Map from key to (weights, iterator in lru_list, footprint)
+    std::unordered_map<GridCacheKey, Node, GridCacheKeyHash> cache_map;
+
     mutable std::mutex mutex;
-    
+
+    /*  Keys some thread is building right now, and who to wake when it is
+     *  done.  A vector because there are never more of these than there are
+     *  threads.  See get_or_build().                                        */
+    std::vector<GridCacheKey>          inflight;
+    std::condition_variable_any        inflight_cv;
+
     void move_to_front(const GridCacheKey& key, KeyList::iterator it) {
         // Move this key to front (most recently used)
         lru_list.splice(lru_list.begin(), lru_list, it);
     }
-    
+
     void evict_lru() {
         // Remove least recently used (back of list)
         if (!lru_list.empty()) {
             auto lru_key = lru_list.back();
-            cache_map.erase(lru_key);
+            if (auto it = cache_map.find(lru_key); it != cache_map.end()) {
+                cache_bytes -= std::min(cache_bytes, it->second.bytes);
+                /*  The shared_ptr keeps the table alive for any thread still
+                 *  summing over it; only this cache's claim on it goes.      */
+                cache_map.erase(it);
+            }
             lru_list.pop_back();
         }
     }
-    
+
+    /*  Always keep one entry, whatever the budget says: evicting the table the
+     *  caller is about to apply turns the cache into a slow no-op rather than
+     *  a small one, and rebuilding one means a binary search and a sort per
+     *  model pixel.                                                          */
+    void trim_() {
+        const std::size_t budget =
+            MemoryBudget::instance().rotational_weights();
+        while (cache_map.size() > 1 && !lru_list.empty() &&
+               (cache_map.size() > MAX_CACHE_SIZE || cache_bytes > budget)) {
+            const std::size_t before = cache_map.size();
+            evict_lru();
+            /*  GridCacheKey compares with a tolerance but hashes exactly, so
+             *  two keys can be equal without landing in the same bucket and a
+             *  lookup by the LRU list's copy can miss.  That drains the list
+             *  without shrinking the map, and an eviction loop that trusted
+             *  the byte total would then spin forever holding this mutex.
+             *  One eviction that frees nothing is enough to stop.           */
+            if (cache_map.size() == before) break;
+        }
+    }
+
 public:
     // Try to get weights from cache; nullptr on a miss
     WeightsPtr get(const GridCacheKey& key) {
@@ -115,39 +192,103 @@ public:
         }
 
         // Cache hit - update LRU order
-        move_to_front(key, it->second.second);
-        return it->second.first;
+        move_to_front(key, it->second.lru_pos);
+        return it->second.weights;
     }
 
     // Put weights into cache
     void put(const GridCacheKey& key, WeightsPtr weights) {
+        /*  Measured outside the lock: it walks one vector per model pixel. */
+        const std::size_t nbytes = weights ? weights->bytes() : 0;
+
         std::lock_guard<std::mutex> lock(mutex);
 
         auto it = cache_map.find(key);
         if (it != cache_map.end()) {
             // Key already exists - update and move to front
-            it->second.first = std::move(weights);
-            move_to_front(key, it->second.second);
+            cache_bytes -= std::min(cache_bytes, it->second.bytes);
+            it->second.weights = std::move(weights);
+            it->second.bytes   = nbytes;
+            cache_bytes += nbytes;
+            move_to_front(key, it->second.lru_pos);
+            trim_();
             return;
-        }
-
-        // Check if cache is full
-        if (cache_map.size() >= MAX_CACHE_SIZE) {
-            evict_lru();
         }
 
         // Insert new entry at front of LRU list
         lru_list.push_front(key);
-        cache_map[key] = {std::move(weights), lru_list.begin()};
+        cache_map[key] = {std::move(weights), lru_list.begin(), nbytes};
+        cache_bytes += nbytes;
+        trim_();
     }
-    
+
     // Clear all cache entries
     void clear() {
         std::lock_guard<std::mutex> lock(mutex);
         cache_map.clear();
         lru_list.clear();
+        cache_bytes = 0;
     }
-    
+
+    std::size_t bytes_used() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return cache_bytes;
+    }
+
+    /* ------------------------------------------------------------------ *
+     *  Build under single-flight: at most one thread computes any given
+     *  key, the rest wait for it and take its result.
+     *
+     *  Without this, `get` returning null was an invitation for every
+     *  thread to build the same table.  That is exactly what a Jacobian
+     *  does -- its columns run in parallel and all of them want the model
+     *  at the *current* vsini, so they miss the same cold key at the same
+     *  moment.  On the 8-arm UVES fit that is eight concurrent builds of a
+     *  ~900 MB table, seven of which are thrown away after being paid for
+     *  in full.  The work was wasted; the peak memory was not, and it is
+     *  what an entry cap cannot touch, because none of those copies is in
+     *  the cache yet.
+     *
+     *  Resolution.cpp already does this for the instrumental weights, and
+     *  for the same reason.  The metal path's segment cache does too.
+     * ------------------------------------------------------------------ */
+    template <typename Build>
+    WeightsPtr get_or_build(const GridCacheKey& key, Build&& build) {
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            for (;;) {
+                auto it = cache_map.find(key);
+                if (it != cache_map.end()) {
+                    move_to_front(key, it->second.lru_pos);
+                    return it->second.weights;
+                }
+                if (std::find(inflight.begin(), inflight.end(), key) ==
+                    inflight.end()) {
+                    inflight.push_back(key);
+                    break;                       // this thread builds it
+                }
+                inflight_cv.wait(lock);
+            }
+        }
+
+        /*  Clears the marker however this scope is left, so a builder that
+         *  throws wakes the waiters instead of stranding them.             */
+        struct FlightGuard {
+            LRUCache* self; const GridCacheKey& key;
+            ~FlightGuard() {
+                std::lock_guard<std::mutex> lock(self->mutex);
+                auto it = std::find(self->inflight.begin(),
+                                    self->inflight.end(), key);
+                if (it != self->inflight.end()) self->inflight.erase(it);
+                self->inflight_cv.notify_all();
+            }
+        } guard{this, key};
+
+        auto built = std::make_shared<const RotationalWeights>(build());
+        put(key, built);
+        return built;
+    }
+
     // Get current cache size
     std::size_t size() const {
         std::lock_guard<std::mutex> lock(mutex);
@@ -267,6 +408,17 @@ static RotationalWeights compute_weights(const Vector& lam,
                  [](const auto& a, const auto& b) { return a.idx < b.idx; });
         
         std::vector<RotationalWeights::WeightEntry> consolidated;
+        /*  At most one entry per tap, and never more.  Without this the
+         *  vector grows from empty by doubling and lands on the next power of
+         *  two above the tap count -- 256 slots for ~162 taps.  That slack is
+         *  a third of the whole table, and there is one of these per model
+         *  pixel: on the synthe grid it is the difference between 888 MiB and
+         *  565 MiB, which in turn is the difference between a cache share
+         *  holding one of them and holding three.  Two is the minimum that
+         *  works, because a Jacobian column wants the table at vsini and at
+         *  vsini+h and would otherwise evict one to build the other on every
+         *  column.                                                          */
+        consolidated.reserve(point_weights.size());
         for (const auto& w : point_weights) {
             if (!consolidated.empty() && consolidated.back().idx == w.idx) {
                 consolidated.back().weight += w.weight;
@@ -274,8 +426,15 @@ static RotationalWeights compute_weights(const Vector& lam,
                 consolidated.push_back(w);
             }
         }
-        
-        weights.weights_per_point[i] = std::move(consolidated);
+
+        /*  assign into the empty destination rather than moving, so the stored
+         *  vector's capacity is its size: `consolidated` still carries the
+         *  slack between the tap count and how many survived consolidation,
+         *  which at low vsini (where most taps merge) is most of it.  Copying
+         *  a few hundred pairs is nothing against the binary search per tap
+         *  that produced them.                                              */
+        weights.weights_per_point[i].assign(consolidated.begin(),
+                                            consolidated.end());
     }
     
     return weights;
@@ -320,20 +479,14 @@ Vector rotational_broaden(const Vector& lam,
     // Create cache key including wavelength grid signature
     GridCacheKey key = make_grid_key(lam, vsini_kms, epsilon, n_kernel);
     
-    // Try to get from cache
-    if (auto cached = g_weightCache.get(key)) {
-        // Cache hit! Just apply precomputed weights
-        return apply_weights(flux, *cached);
-    }
+    /*  Hit, or the one build that everyone else waits on -- see
+     *  LRUCache::get_or_build.  The returned handle keeps the table alive
+     *  even if the budget evicts it the moment it is inserted, which is what
+     *  happens when a single table is larger than the whole share.          */
+    auto weights = g_weightCache.get_or_build(key, [&] {
+        return compute_weights(lam, vsini_kms, epsilon, n_kernel);
+    });
 
-    // Cache miss - compute weights
-    auto weights = std::make_shared<const RotationalWeights>(
-        compute_weights(lam, vsini_kms, epsilon, n_kernel));
-
-    // Store in cache (will handle LRU eviction if needed)
-    g_weightCache.put(key, weights);
-
-    // Apply weights
     return apply_weights(flux, *weights);
 }
 
@@ -649,7 +802,20 @@ std::mutex        g_segMtx;
 std::size_t       g_segBytes = 0;
 std::vector<SegKey>     g_segInflight;
 std::condition_variable g_segInflightCv;
-constexpr std::size_t SEG_MAX_BYTES = 256ull << 20;
+
+/*  Half the rotational share, because the per-point cache above draws on the
+ *  same share and the two cannot see each other's usage.  A fit uses one or
+ *  the other -- the metal path builds segments, the HHE-only path builds
+ *  per-point tables -- so halving costs nothing except in a binary whose two
+ *  components sit on grids of different kinds, which is the one case where
+ *  both are live and the sum has to stay inside the share.
+ *
+ *  Was a hard-coded 256 MiB, which is below half of any share this returns on
+ *  a machine that can run the fit at all, so this only ever lifts it.       */
+std::size_t seg_max_bytes()
+{
+    return MemoryBudget::instance().rotational_weights() / 2;
+}
 
 } // anonymous namespace
 
@@ -740,7 +906,7 @@ Vector rotational_broaden(const Vector& lam_in,
              *  scratch.  That costs nothing on the shift-invariant path (the
              *  tables are ~10 MB there) and is the difference between a cache
              *  and a treadmill on an input grid that is not log-uniform.    */
-            while (g_segCache.size() > 2 && g_segBytes > SEG_MAX_BYTES) {
+            while (g_segCache.size() > 2 && g_segBytes > seg_max_bytes()) {
                 const SegKey victim = g_segLru.back();
                 if (auto it = g_segCache.find(victim); it != g_segCache.end()) {
                     g_segBytes -= std::min(g_segBytes, it->second.second);
@@ -779,5 +945,24 @@ std::size_t get_rotational_cache_size()
 {
     return g_weightCache.size();
 }
+
+/*  Both rotational caches, for GAEL_MEM_STATS.  The per-point tables and the
+ *  segment tables are used by different paths (HHE-only and metal), so a fit
+ *  normally has one of the two at zero.                                     */
+std::size_t rotational_cache_bytes()
+{
+    std::size_t seg = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_segMtx);
+        seg = g_segBytes;
+    }
+    return g_weightCache.bytes_used() + seg;
+}
+
+/*  Entry count alongside the bytes.  The two together are what distinguishes
+ *  "the budget is holding several tables" from "one table is bigger than the
+ *  whole budget and is being kept because evicting it would leave nothing" --
+ *  which look the same in a byte total and want different fixes.           */
+std::size_t rotational_cache_entries() { return g_weightCache.size(); }
 
 } // namespace specfit
