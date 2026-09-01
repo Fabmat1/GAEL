@@ -557,16 +557,19 @@ FitResult GaelSession::run_impl()
                 "reading " + std::to_string(n_done + 1) + '/' +
                     std::to_string(n_input_files) + "  |  " +
                     std::filesystem::path(f.filename).filename().string());
+            const int input_index = n_done;
             ++n_done;
 
             DataSet ds;
             std::string why;
             if (preprocess_one(f, obs, gs, ds, why)) {
+                ds.input_index = input_index;
                 datasets.push_back(std::move(ds));
                 ds_intervals.push_back(
                     f.cspline_anchorpoints.value_or(obs.cspline_anchorpoints));
             } else {
                 R.rejected_files.push_back(f.filename);
+                R.rejected_indices.push_back(input_index);
                 log("rejected: " + f.filename + "  (" + why + ")");
             }
         }
@@ -771,6 +774,7 @@ FitResult GaelSession::run_impl()
 
         SpectrumResult S;
         S.source_filename = ds.name;
+        S.input_index     = ds.input_index;
         S.lambda          = ds.obs.lambda;
         S.flux            = ds.obs.flux;
         S.sigma           = ds.obs.sigma;

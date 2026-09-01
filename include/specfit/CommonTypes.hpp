@@ -14,6 +14,12 @@ namespace specfit {
 // One observed spectrum dataset
 struct DataSet {
     std::string              name;        // e.g. file name (for diagnostics)
+    /*  Position of this spectrum in the caller's submission order, counted
+     *  over every file of every observation.  Datasets that fail
+     *  preprocessing are dropped, so the accepted ones are no longer at their
+     *  submitted positions; this is what lets a consumer map a result back to
+     *  the spectrum it asked about.  -1 when unset.                          */
+    int                      input_index = -1;
     Spectrum                 obs;         // on Nyquist grid, *after* masking
     Vector                   cont_x;      // anchor abscissae
     std::vector<double>      cont_y;      // mutable ordinates (parameters)

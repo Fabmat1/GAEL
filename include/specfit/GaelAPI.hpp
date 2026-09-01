@@ -232,6 +232,12 @@ struct ComponentResult {
 struct SpectrumResult {
     std::string source_filename;
 
+    /*  Position of this spectrum in the caller's submission order, counted
+     *  over every file of every observation.  Rejected spectra are absent
+     *  from `spectra`, so its index there is *not* the submitted position:
+     *  map results back with this, never by position.                        */
+    int input_index = -1;
+
     // rebinned observed spectrum on the Nyquist grid (what the fit saw)
     Vector lambda;
     Vector flux;
@@ -286,6 +292,9 @@ struct FitResult {
 
     // Files rejected during preprocessing (SNR / blue-cut / load failure)
     std::vector<std::string> rejected_files;
+    // Their submission positions, in the same order as `rejected_files`, so a
+    // caller can name the rejected spectra without matching on file names.
+    std::vector<int>         rejected_indices;
 
     // raw flat parameter vector + uncertainties (for advanced consumers)
     std::vector<double> raw_params;
