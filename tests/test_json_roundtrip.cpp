@@ -184,7 +184,7 @@ int main()
     /* ---- GlobalSettings --------------------------------------------- */
     {
         api::GlobalSettings gs;
-        gs.base_paths = {"/data/grids", "ssh://indus/home/indus/grids"};
+        gs.base_paths = {"/data/grids", "ssh://gridserver/data/grids"};
         gs.filter_snr = 5.0;
         gs.untie_params = {"vrad", "vsini"};
         gs.cont_jitter_K = 3;
@@ -197,7 +197,7 @@ int main()
         api::global_settings_to_json_file(back, b);
         CHECK(slurp(a) == slurp(b), "GlobalSettings write/read/write stable");
         CHECK(back.base_paths.size() == 2 &&
-                  back.base_paths[1] == "ssh://indus/home/indus/grids",
+                  back.base_paths[1] == "ssh://gridserver/data/grids",
               "scheme base paths survive");
         CHECK(back.untie_params.size() == 2, "untie params survive");
     }
