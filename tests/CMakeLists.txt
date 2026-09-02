@@ -45,6 +45,19 @@ function(gael_add_comparison_test name script)
         LABELS "comparison;slow")
 endfunction()
 
+# Fast, hermetic unit test: GridDataProvider routing and caching.
+add_executable(test_grid_provider test_grid_provider.cpp)
+target_link_libraries(test_grid_provider PRIVATE GAELcore)
+add_test(NAME grid_provider COMMAND test_grid_provider)
+set_tests_properties(grid_provider PROPERTIES TIMEOUT 120 LABELS "unit")
+
+# Fast, hermetic unit test: JSON round trips for out-of-process fitting.
+add_executable(test_json_roundtrip test_json_roundtrip.cpp)
+target_link_libraries(test_json_roundtrip PRIVATE GAELcore
+                      nlohmann_json::nlohmann_json)
+add_test(NAME json_roundtrip COMMAND test_json_roundtrip)
+set_tests_properties(json_roundtrip PROPERTIES TIMEOUT 120 LABELS "unit")
+
 gael_add_comparison_test(gael_vs_isis_mock test_mock_vs_isis.py)
 gael_add_comparison_test(gael_vs_isis_real test_real_vs_isis.py)
 

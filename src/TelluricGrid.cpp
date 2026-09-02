@@ -1,4 +1,5 @@
 #include "specfit/TelluricGrid.hpp"
+#include "specfit/GridDataProvider.hpp"
 #include "specfit/Rebin.hpp"
 #include "specfit/Resolution.hpp"
 
@@ -152,7 +153,8 @@ std::string TelluricGrid::resolve(const std::vector<std::string>& bases)
      *  here is one ISIS would also accept.                                 */
     for (const auto& b : bases) {
         fs::path p = fs::path(b) / "telluric";
-        if (fs::exists(p / "LBL_A10_s0_w005_R0300000_T.fits")) return p.string();
+        if (grid_path_exists((p / "LBL_A10_s0_w005_R0300000_T.fits").string()))
+            return p.string();
     }
     throw std::runtime_error(
         "Telluric library not found: no <basePath>/telluric/ contains "
@@ -187,7 +189,8 @@ SpectrumPtr TelluricGrid::corner(int a10, int w100,
         {
             std::lock_guard<std::mutex> lk(lam_mtx);
             if (lam_air.size() == 0) {
-                CCfits::FITS f(corner_path(airmass_nodes()[0], pwv_nodes()[0]),
+                CCfits::FITS f(localize_grid_path(
+                                   corner_path(airmass_nodes()[0], pwv_nodes()[0])),
                                CCfits::Read);
                 CCfits::ExtHDU& e = f.extension(1);
                 std::vector<Real> um;
@@ -202,7 +205,7 @@ SpectrumPtr TelluricGrid::corner(int a10, int w100,
 
         std::vector<Real> tr;
         {
-            CCfits::FITS f(corner_path(a10, w100), CCfits::Read);
+            CCfits::FITS f(localize_grid_path(corner_path(a10, w100)), CCfits::Read);
             CCfits::ExtHDU& e = f.extension(1);
             e.column("trans").read(tr, 1, e.rows());
         }

@@ -10,6 +10,7 @@
 #include <vector>
 
 namespace specfit { class UnifiedFitWorkflow; }   // forward decl in parent ns
+namespace specfit { class GridDataProvider;  }   // see GridDataProvider.hpp
 
 namespace specfit::api {
 
@@ -78,6 +79,12 @@ struct GlobalSettings {
     std::function<void(int stage_index,
         const ::specfit::UnifiedFitWorkflow& wf)>
     on_stage_complete;
+
+    /*  Optional source for grid files that are not on the local filesystem
+     *  (base_paths entries with a scheme prefix such as "ssh://...").
+     *  GaelSession::run() installs it into the process-wide slot for the
+     *  duration of the fit; see GridDataProvider.hpp.                      */
+    std::shared_ptr<::specfit::GridDataProvider> grid_provider;
 
     // Special members defined out-of-line in GaelAPI.cpp so that the
     // std::vector / std::function destructors run inside GAELcore's TU.
@@ -379,5 +386,19 @@ private:
 // ---------- JSON adapters (defined in GaelAPI_json.cpp) ------------------
 GlobalSettings global_settings_from_json_file(const std::string& path);
 FitInput       fit_input_from_json_file      (const std::string& path);
+
+/*  Writers, the exact inverse of the readers above: a file written here and
+ *  read back yields an equal GlobalSettings / FitInput.  Note the readers
+ *  expand ${VAR} references, so values written verbatim must not contain
+ *  literal "${" sequences that are not meant as environment references.    */
+void global_settings_to_json_file(const GlobalSettings& gs,
+                                  const std::string& path);
+void fit_input_to_json_file(const FitInput& fi, const std::string& path);
+
+/*  Complete, lossless FitResult (de)serialization for running fits out of
+ *  process (defined in GaelAPI_result_json.cpp).  The schema carries
+ *  "gael_result_version"; the reader rejects versions it does not know.    */
+void      fit_result_to_json_file(const FitResult& r, const std::string& path);
+FitResult fit_result_from_json_file(const std::string& path);
 
 } // namespace specfit::api

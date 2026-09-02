@@ -1,4 +1,5 @@
 #include "specfit/ModelGrid.hpp"
+#include "specfit/GridDataProvider.hpp"
 #include "specfit/Resolution.hpp"
 #include "specfit/RotationalConvolution.hpp"  // Added include
 #include "specfit/SpectrumCache.hpp"
@@ -54,7 +55,11 @@ resolve_grid(const std::vector<std::string>& bases,
 {
     for (const auto& b : bases) {
         fs::path p = fs::path(b) / rel_path;
-        if (fs::exists(p / "grid.fits")) return p.string();
+        /*  grid_path_exists routes bases a GridDataProvider handles (e.g.
+         *  "ssh://host/...") through the provider; plain paths keep the
+         *  fs::exists behaviour.  base_ then stays the virtual path and
+         *  every later read localizes it just before opening.             */
+        if (grid_path_exists((p / "grid.fits").string())) return p.string();
     }
     throw std::runtime_error("Grid '" + rel_path + "' not found.");
 }
@@ -64,7 +69,7 @@ ModelGrid::ModelGrid(const std::vector<std::string>& bases,
                      const std::string& rel_path)
 : base_(resolve_grid(bases, rel_path))
 {
-    CCfits::FITS f(base_ + "/grid.fits", CCfits::Read);
+    CCfits::FITS f(localize_grid_path(base_ + "/grid.fits"), CCfits::Read);
     CCfits::ExtHDU& ext = f.extension(1);
     for (const auto& [name, col] : ext.column()) {
         std::vector<Real> buf;
@@ -238,6 +243,27 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
     } lc;
     //std::cout << "[LoadSpec] Corner fetching." << std::endl;
 
+    auto corner_path = [&](const Node& nd) -> std::string {
+        std::ostringstream oss;
+        oss<<base_<<"/HHE"
+           <<"/Z"<<fmt(nd.z,2)
+           <<"/HE"<<fmt(nd.h,3)
+           <<"/X"<<fmt(nd.x,2)
+           <<"/G"<<fmt(nd.g,3)
+           <<"/T"<<int(std::lround(nd.t))<<".fits";
+        return oss.str();
+    };
+
+    /*  A remote provider can pipeline all corner files of this evaluation
+     *  in one round trip instead of paying the latency per corner.        */
+    if (auto prov = grid_data_provider(); prov && prov->handles(base_)) {
+        std::vector<std::string> want;
+        want.reserve(static_cast<std::size_t>(nN));
+        for (int i=0;i<nN;++i)
+            if (nodes[i].w != 0.0) want.push_back(corner_path(nodes[i]));
+        prov->prefetch(want);
+    }
+
     /* ---------- helper to fetch / cache one corner ---------------- */
     auto fetch = [&](const Node& nd)->const Spectrum& {
         //std::cout << "[LoadSpec](fetch) Fetching..." << std::endl;
@@ -249,6 +275,11 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
         int Xi=int(std::lround(nd.x*100));
 
         Key k = pack(Ti,Gi,Zi,Hi,Xi);
+        /*  The node coordinates alone do not identify a corner: two grids
+         *  with the same axis values (sdB/processed vs processed_25, or a
+         *  local and a streamed copy of one grid) would collide in the
+         *  process-wide cache and serve each other's spectra.              */
+        k = hash_combine(k, std::hash<std::string>{}(base_));
         k = hash_combine(k, hash_combine(0x5152A710ULL, std::size_t(with_continuum)));
         k = hash_combine(k, hash_double(vsini));      // Include vsini in cache key
         k = hash_combine(k, hash_double(resOffset));
@@ -262,14 +293,7 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                 e.sp = std::move(sp);                           // global hit
             else {
                 //std::cout << "[LoadSpec](fetch) Cache miss, calculating." << std::endl;
-                std::ostringstream oss;
-                oss<<base_<<"/HHE"
-                   <<"/Z"<<fmt(nd.z,2)
-                   <<"/HE"<<fmt(nd.h,3)
-                   <<"/X"<<fmt(nd.x,2)
-                   <<"/G"<<fmt(nd.g,3)
-                   <<"/T"<<Ti<<".fits";
-                const std::string path = oss.str();
+                const std::string path = corner_path(nd);
 
                 e.sp = SpectrumCache::instance()
                          .insert_if_absent(k,[&]{
@@ -387,7 +411,7 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
  * =================================================================== */
 static Vector read_lambda_column(const std::string& path)
 {
-    CCfits::FITS f(path, CCfits::Read);
+    CCfits::FITS f(localize_grid_path(path), CCfits::Read);
     CCfits::ExtHDU& e = f.extension(1);
     std::vector<Real> tmp;
     e.column("l").read(tmp, 1, e.rows());
@@ -507,10 +531,7 @@ Vector ModelGrid::load_element_factor(int    s,
 
     const auto nodes = build_corners(axes, vals);
 
-    Vector out; bool first = true; double wsum = 0.0;
-    for (const auto& nd : nodes) {
-        if (nd.weight == 0.0) continue;      // pinned axis: half the corners
-
+    auto element_path = [&](const CubeCorner& nd) -> std::string {
         std::ostringstream oss;
         oss << base_ << '/' << name
             << "/Z"  << fmt(nd.coord[0], 2)
@@ -519,13 +540,31 @@ Vector ModelGrid::load_element_factor(int    s,
             << "/G"  << fmt(nd.coord[3], 3)
             << "/T"  << int(std::lround(nd.coord[4]))
             << '/'   << fmt(nd.coord[5], 3) << ".fits";
+        return oss.str();
+    };
 
-        std::size_t key = std::hash<std::string>{}(oss.str());
+    /*  Same batching hint as load_spectrum: a remote provider fetches all
+     *  corners of this element cube in one round trip.                    */
+    if (auto prov = grid_data_provider(); prov && prov->handles(base_)) {
+        std::vector<std::string> want;
+        want.reserve(nodes.size());
+        for (const auto& nd : nodes)
+            if (nd.weight != 0.0) want.push_back(element_path(nd));
+        prov->prefetch(want);
+    }
+
+    Vector out; bool first = true; double wsum = 0.0;
+    for (const auto& nd : nodes) {
+        if (nd.weight == 0.0) continue;      // pinned axis: half the corners
+
+        const std::string epath = element_path(nd);
+
+        std::size_t key = std::hash<std::string>{}(epath);
         key = hash_combine(key, 0xE1E3E27ULL);
         key = hash_combine(key, window_key_);
 
         SpectrumPtr sp = SpectrumCache::instance().insert_if_absent(key, [&] {
-            return read_element_fits(oss.str(), s);
+            return read_element_fits(epath, s);
         });
 
         if (first) { out = Vector::Zero(sp->flux.size()); first = false; }
@@ -548,7 +587,7 @@ Spectrum ModelGrid::read_element_fits(const std::string& path, int s) const
 {
     const Vector& lam = species_lambda(s);
 
-    CCfits::FITS f(path, CCfits::Read);
+    CCfits::FITS f(localize_grid_path(path), CCfits::Read);
     CCfits::ExtHDU& ext = f.extension(1);
     std::vector<Real> fl;
     ext.column("f").read(fl, 1, ext.rows());
@@ -601,8 +640,8 @@ Spectrum ModelGrid::read_fits(const std::string& path, bool with_continuum) cons
     }
     if (lam.size()==0) {
         fs::path lp = fs::path(base_) / "HHE" / "lambda.fits";
-        if (fs::exists(lp)){
-            CCfits::FITS fl(lp.string(), CCfits::Read);
+        if (grid_path_exists(lp.string())){
+            CCfits::FITS fl(localize_grid_path(lp.string()), CCfits::Read);
             CCfits::ExtHDU& e = fl.extension(1);
             Vec tmp; e.column("l").read(tmp,1,e.rows());
             lam = Eigen::Map<Vector>(tmp.data(),tmp.size());
@@ -611,7 +650,7 @@ Spectrum ModelGrid::read_fits(const std::string& path, bool with_continuum) cons
         }
     }
 
-    CCfits::FITS f(path, CCfits::Read);
+    CCfits::FITS f(localize_grid_path(path), CCfits::Read);
     CCfits::ExtHDU& ext = f.extension(1);
 
     /*  Column "f" is the normalised flux, column "c" the flux-calibrated one

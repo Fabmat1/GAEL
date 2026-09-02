@@ -181,6 +181,8 @@ add_library(GAELcore
     src/SpectrumLoaders.cpp
     src/GaelAPI.cpp
     src/GaelAPI_json.cpp       # JSON adapters (separate TU)
+    src/GaelAPI_result_json.cpp # FitResult <-> JSON for out-of-process fits
+    src/GridDataProvider.cpp   # pluggable remote grid file source
 )
 add_library(GAEL::core ALIAS GAELcore)
 
@@ -244,6 +246,19 @@ endif()
 add_executable(GAEL src/main.cpp)
 target_include_directories(GAEL PRIVATE extern)
 target_link_libraries(GAEL PRIVATE GAELcore cxxopts::cxxopts)
+
+# Version stamp for `GAEL --version`, which host applications use to check
+# worker-bundle compatibility.  git describe when available, else a fallback.
+execute_process(COMMAND git describe --tags --always --dirty
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                OUTPUT_VARIABLE GAEL_GIT_DESCRIBE
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+if(NOT GAEL_GIT_DESCRIBE)
+    set(GAEL_GIT_DESCRIBE "unknown")
+endif()
+target_compile_definitions(GAEL PRIVATE
+    GAEL_VERSION_STRING="${GAEL_GIT_DESCRIBE}")
 if(GAEL_BUILD_REPORT)
     target_link_libraries(GAEL PRIVATE GAELreport Python3::Python)
     target_compile_definitions(GAEL PRIVATE GAEL_HAVE_REPORT)

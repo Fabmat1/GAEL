@@ -1,4 +1,5 @@
 #include "specfit/GaelAPI.hpp"
+#include "specfit/GridDataProvider.hpp"
 #include "specfit/UnifiedFitWorkflow.hpp"
 #include "specfit/CommonTypes.hpp"
 #include "specfit/ModelGrid.hpp"
@@ -403,6 +404,20 @@ void reanchor(DataSet& ds, const std::vector<std::array<double,3>>& intervals)
 
 FitResult GaelSession::run()
 {
+    /*  Install this session's grid provider (if any) for the duration of the
+     *  fit and restore whatever was set before, so nested/serial sessions in
+     *  one process cannot leak each other's providers.                      */
+    struct ProviderScope {
+        std::shared_ptr<::specfit::GridDataProvider> prev;
+        bool installed = false;
+        ~ProviderScope() { if (installed) ::specfit::set_grid_data_provider(std::move(prev)); }
+    } scope;
+    if (impl_->gs.grid_provider) {
+        scope.prev = ::specfit::grid_data_provider();
+        ::specfit::set_grid_data_provider(impl_->gs.grid_provider);
+        scope.installed = true;
+    }
+
     try {
         return run_impl();
     } catch (const ::specfit::FitAborted&) {

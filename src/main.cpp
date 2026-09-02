@@ -7,15 +7,25 @@
 #include "specfit/UnifiedFitWorkflow.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
+#include <ctime>
 #include <cxxopts.hpp>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <random>
 #include <utility>
+
+#include <unistd.h>
+
+#ifndef GAEL_VERSION_STRING
+#define GAEL_VERSION_STRING "unknown"
+#endif
 
 #ifdef GAEL_HAVE_REPORT
 #include "specfit/ReportUtils.hpp"
@@ -128,6 +138,69 @@ void write_model_dats(const std::string &out_dir, const api::FitResult &result) 
     std::cout << "Written model dumps to: " << out_dir << '\n';
 }
 
+/*  SIGTERM asks the fit to stop the way the progress callback does: the CLI's
+ *  callback returns false once this flips, the LM loop unwinds at the next
+ *  iteration boundary, and run() comes back with Status::Aborted -- so a
+ *  remote host that kills the worker still gets a well-formed result file. */
+std::atomic<bool> g_terminate{false};
+extern "C" void gael_on_sigterm(int) { g_terminate.store(true); }
+
+/*  Machine-readable heartbeat for out-of-process monitoring: a small JSON
+ *  file rewritten atomically (tmp + rename), at most once a second while the
+ *  fit runs and once more with the final state.  Timestamps are this
+ *  machine's clock; a monitor on another machine must compare against this
+ *  machine's clock, never its own.                                          */
+class StatusFile {
+public:
+    explicit StatusFile(std::string path) : path_(std::move(path)) {}
+
+    void tick(const specfit::ProgressReport& r)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (now - last_ < std::chrono::seconds(1)) return;
+        last_ = now;
+        write("running", r.fraction, r.phase, r.detail, r.eta_seconds, -1);
+    }
+
+    void finish(const std::string& state, int exit_code,
+                const std::string& detail = {})
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        write(state, state == "done" ? 1.0 : -1.0, state, detail, -1.0,
+              exit_code);
+    }
+
+private:
+    void write(const std::string& state, double fraction,
+               const std::string& stage, const std::string& detail,
+               double eta_s, int exit_code)
+    {
+        nlohmann::json j;
+        j["pid"]          = static_cast<int>(::getpid());
+        j["state"]        = state;
+        j["stage"]        = stage;
+        j["detail"]       = detail;
+        j["fraction"]     = fraction;
+        j["eta_s"]        = eta_s;
+        j["updated_unix"] = static_cast<long long>(std::time(nullptr));
+        if (exit_code >= 0) j["exit_code"] = exit_code;
+
+        const std::string tmp = path_ + ".tmp";
+        {
+            std::ofstream out(tmp);
+            if (!out) return;              // monitoring must never kill a fit
+            out << j.dump() << '\n';
+        }
+        std::error_code ec;
+        fs::rename(tmp, path_, ec);
+    }
+
+    std::string path_;
+    std::mutex  mtx_;
+    std::chrono::steady_clock::time_point last_{};
+};
+
 std::string find_global_settings() {
     std::vector<std::string> candidates = {
         "global_settings.json",
@@ -174,6 +247,19 @@ int run_synthetic_only(const api::FitInput &fi, const api::GlobalSettings &gs) {
 
 int main(int argc, char **argv) {
     auto t0 = std::chrono::steady_clock::now();
+
+    /*  Outside the try block so the catch handler can still report through
+     *  them: a monitor watching only these files must see every outcome.   */
+    std::unique_ptr<StatusFile> status;
+    std::string                 result_json_path;
+
+    auto write_result_json = [&](const api::FitResult& r) {
+        if (result_json_path.empty()) return;
+        const std::string part = result_json_path + ".part";
+        api::fit_result_to_json_file(r, part);
+        fs::rename(part, result_json_path);
+    };
+
     try {
         cxxopts::Options opts("GAEL",
                               "Multi-dataset stellar spectrum fitting");
@@ -239,8 +325,27 @@ int main(int argc, char **argv) {
             "and fold the continuum-placement scatter into the reported errors "
             "(default from config, typically 6; 0 disables for faster fitting)",
             cxxopts::value<int>())(
-            "no-pdf", "Do not run pdflatex")("h,help", "Show help");
+            "no-pdf", "Do not run pdflatex")(
+            "global", "Global settings JSON (default: search near the binary)",
+            cxxopts::value<std::string>())(
+            "result-json",
+            "Write the complete fit result as JSON to this path (written as "
+            "<path>.part and renamed, so its existence means it is complete; "
+            "also written for failed and aborted fits)",
+            cxxopts::value<std::string>())(
+            "status-file",
+            "Maintain a small machine-readable status JSON at this path "
+            "(atomically rewritten while the fit runs; final state done, "
+            "failed or aborted)",
+            cxxopts::value<std::string>())(
+            "version", "Print version and capability flags, then exit")(
+            "h,help", "Show help");
         auto cli = opts.parse(argc, argv);
+        if (cli.count("version")) {
+            std::cout << "GAEL " << GAEL_VERSION_STRING
+                      << " api=1 result_json=1\n";
+            return 0;
+        }
         if (cli.count("help") || !cli.count("fit")) {
             std::cout << opts.help() << '\n';
             return 0;
@@ -258,7 +363,16 @@ int main(int argc, char **argv) {
             static_cast<std::size_t>(std::max(1, cli["cache-mem"].as<int>()))
                 << 20);
 
-        auto gs = api::global_settings_from_json_file(find_global_settings());
+        if (cli.count("status-file"))
+            status = std::make_unique<StatusFile>(
+                cli["status-file"].as<std::string>());
+        if (cli.count("result-json"))
+            result_json_path = cli["result-json"].as<std::string>();
+        std::signal(SIGTERM, gael_on_sigterm);
+
+        auto gs = api::global_settings_from_json_file(
+            cli.count("global") ? cli["global"].as<std::string>()
+                                : find_global_settings());
         auto fi = api::fit_input_from_json_file(cli["fit"].as<std::string>());
 
         // CLI override of the continuum-jitter systematic (else use config)
@@ -292,9 +406,16 @@ int main(int argc, char **argv) {
         /*  GAEL_PROGRESS=1 puts the phase-by-phase progress report on stderr,
          *  one line per update, so it stays out of the piped stdout that the
          *  test harness reads.  It is also how the tracker's calibration gets
-         *  checked against a real fit.                                      */
-        if (const char *p = std::getenv("GAEL_PROGRESS");
-            p && std::string(p) == "1") {
+         *  checked against a real fit.
+         *
+         *  The callback is installed whenever anything needs per-iteration
+         *  hooks: the stderr report, the status file, or SIGTERM handling
+         *  (abort only unwinds at a callback boundary).                     */
+        const bool progress_stderr = [] {
+            const char *p = std::getenv("GAEL_PROGRESS");
+            return p && std::string(p) == "1";
+        }();
+        if (progress_stderr || status || !result_json_path.empty()) {
             /*  GAEL_PROGRESS_ABORT_AFTER=N exercises the cancellation path
              *  (the callback's return value) from the CLI: the fit stops at
              *  the Nth report and run() comes back with Status::Aborted.   */
@@ -303,26 +424,44 @@ int main(int argc, char **argv) {
             auto seen = std::make_shared<int>(0);
 
             session.set_progress_callback(
-                [abort_after, seen](const specfit::ProgressReport &r) {
-                    std::cerr << "[progress] " << std::fixed
-                              << std::setw(6) << std::setprecision(2)
-                              << 100.0 * r.fraction << "%  "
-                              << std::setprecision(2) << r.elapsed_seconds
-                              << "s";
-                    if (r.eta_seconds >= 0.0)
-                        std::cerr << " (eta " << r.eta_seconds << "s)";
-                    std::cerr << "  " << r.phase;
-                    if (!r.detail.empty()) std::cerr << "  --  " << r.detail;
-                    std::cerr << '\n';
+                [abort_after, seen, progress_stderr,
+                 &status](const specfit::ProgressReport &r) {
+                    if (progress_stderr) {
+                        std::cerr << "[progress] " << std::fixed
+                                  << std::setw(6) << std::setprecision(2)
+                                  << 100.0 * r.fraction << "%  "
+                                  << std::setprecision(2) << r.elapsed_seconds
+                                  << "s";
+                        if (r.eta_seconds >= 0.0)
+                            std::cerr << " (eta " << r.eta_seconds << "s)";
+                        std::cerr << "  " << r.phase;
+                        if (!r.detail.empty()) std::cerr << "  --  " << r.detail;
+                        std::cerr << '\n';
+                    }
+                    if (status) status->tick(r);
+                    if (g_terminate.load()) return false;
                     return !(abort_after > 0 && ++*seen >= abort_after);
                 });
         }
 
         auto result = session.run();
+
+        /*  The result file is written for every outcome, so a remote monitor
+         *  can rely on its appearance alone; the status inside says how the
+         *  fit actually ended.                                              */
+        write_result_json(result);
+
         if (result.status == api::Status::Aborted) {
+            if (status) status->finish("aborted", 2, result.error_message);
             std::cerr << "Aborted: " << result.error_message << '\n';
             return 2;
         }
+        if (result.status != api::Status::Ok) {
+            if (status) status->finish("failed", 1, result.error_message);
+            std::cerr << "Fit failed: " << result.error_message << '\n';
+            return 1;
+        }
+        if (status) status->finish("done", 0);
 
         /* ---- always emit fit_parameters.csv from the CLI ------------- */
         write_fit_parameters_csv(fi.output_path, result);
@@ -341,6 +480,13 @@ int main(int argc, char **argv) {
 
     } catch (const std::exception &e) {
         std::cerr << "Error: " << e.what() << '\n';
+        if (status) status->finish("failed", 1, e.what());
+        try {
+            api::FitResult r;
+            r.status        = api::Status::InternalError;
+            r.error_message = e.what();
+            write_result_json(r);
+        } catch (...) { /* reporting must not mask the original error */ }
         return 1;
     }
 
