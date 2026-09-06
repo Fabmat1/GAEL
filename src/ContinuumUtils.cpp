@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cmath>       // std::abs
+#include <limits>      // numeric_limits
 
 namespace specfit {
 
@@ -90,9 +91,43 @@ Vector anchors_from_intervals(
         if (hi >= clip_lo && hi <= clip_hi) xs.push_back(hi);
     }
 
-    /* ---------- final clean-up ---------------------------------------- */
+    /* ---------- final clean-up ---------------------------------------- *
+     *  Two knots the spline cannot tell apart make its basis singular.  The
+     *  derivative of the continuum with respect to such an anchor blows up
+     *  -- measured at ~1e8 for a pair 7e-12 A apart -- and because the LM
+     *  damping is scaled by the largest column of the Jacobian, that single
+     *  anchor then sets the damping for *every* parameter in the fit: the
+     *  first step comes out at ~1e-14, the step tolerance calls it converged
+     *  and nothing, in any spectrum of a joint fit, ever moves.
+     *
+     *  Exact duplicates were already dropped here, which covered the knot two
+     *  adjacent intervals share.  Near-duplicates were not, and they are the
+     *  common case: an interval whose step divides [lo,hi] a whole number of
+     *  times emits `hi` twice, once as the accumulated loop variable and once
+     *  explicitly below, and twenty additions of 24.46454941171705 do not
+     *  land on 6807.22728309345 to the last bit.
+     *
+     *  Knots are merged when they are closer than half of the finest data bin,
+     *  because closer than that the pixels being fitted cannot resolve them
+     *  and keeping both can only hurt.  The relative floor keeps the test
+     *  meaningful if the caller ever passes a spectrum with a single bin.   */
+    double min_bin = std::numeric_limits<double>::infinity();
+    for (Eigen::Index i = 1; i < n_lam; ++i) {
+        const double d = std::abs(spectrum.lambda[i] - spectrum.lambda[i - 1]);
+        if (d > 0.0) min_bin = std::min(min_bin, d);
+    }
+    const double merge_bin = std::isfinite(min_bin) ? 0.5 * min_bin : 0.0;
+
     std::sort(xs.begin(), xs.end());
-    xs.erase(std::unique(xs.begin(), xs.end()), xs.end());
+    xs.erase(std::unique(xs.begin(), xs.end(),
+                         [&](double a, double b) {
+                             const double tol =
+                                 std::max(merge_bin,
+                                          1e-9 * std::max(std::abs(a),
+                                                          std::abs(b)));
+                             return std::abs(b - a) <= tol;
+                         }),
+             xs.end());
 
     if (xs.size() < 2)
         throw std::runtime_error(

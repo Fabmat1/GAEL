@@ -102,6 +102,19 @@ inline constexpr double kLMGradientTol = 1e-6;
 inline constexpr double kLMStepTol     = 1e-8;
 inline constexpr double kLMChi2Tol     = 1e-10;
 
+/*  How far, and how often, the step test may back the damping off before it
+ *  accepts that the starting point really is stationary.
+ *
+ *  The retry stops at the *first* lambda that produces a meaningful step, so a
+ *  gentle factor lands on the least reduction that works rather than dropping
+ *  straight to an undamped Gauss-Newton step on a matrix that has just been
+ *  shown to be badly scaled.  Three decades a time clears the worst start
+ *  observed (lambda = 1.1e13 where 1e-3 was well scaled) in three retries, and
+ *  eight of them bound the cost: each retry is one LDLT solve, which on a
+ *  2500-parameter joint fit is not free.                                    */
+inline constexpr double kLMLambdaBackoff     = 1e-3;
+inline constexpr int    kLMMaxLambdaBackoffs = 8;
+
 struct LMSolverSummary {
     int    iterations         = 0;
     double initial_chi2       = 0.0;
@@ -401,6 +414,11 @@ levenberg_marquardt(Functor&&                    func,
 
     int consecutive_rejects = 0;
 
+    /*  Whether the solver has ever managed to move, and how often the damping
+     *  has been backed off because it had not.  See the step test below.    */
+    bool accepted_any    = false;
+    int  lambda_backoffs = 0;
+
     /*  A rejected step leaves J and r exactly as they were, so JᵀJ and Jᵀr
      *  come out identical and only the damping changes.  Rebuilding them
      *  anyway was the single most expensive thing the solver did once the
@@ -516,6 +534,39 @@ levenberg_marquardt(Functor&&                    func,
                                     std::sqrt(diag_JTJ[c]) * std::abs(dx_free[c])
                                         / rnorm_s);
             if (step_max < opt.step_tolerance) {
+                /*  A step this small means "x is stationary" only once the
+                 *  solver has actually been somewhere.  At the starting
+                 *  point, with lambda still at the value derived from the
+                 *  largest column of J, it far more often means the damping
+                 *  is simply too large for this problem: lambda multiplies
+                 *  diag(JtJ) again (Fletcher scaling), so one ill-conditioned
+                 *  column -- two continuum knots that landed on top of each
+                 *  other, an anchor with no noticed pixel beside it -- damps
+                 *  every *other* parameter into immobility with it.  On a
+                 *  115-spectrum joint fit that turned one bad anchor into a
+                 *  fit that reported convergence after a single iteration
+                 *  with every parameter still at its initial value.
+                 *
+                 *  So before believing it, back the damping off and re-solve.
+                 *  The Jacobian is not stale, so this costs one LDLT solve;
+                 *  a fit that was already moving never reaches this branch
+                 *  (its first step is orders of magnitude above the
+                 *  tolerance), which is what keeps the guard inert.         */
+                if (!accepted_any && lambda_backoffs < kLMMaxLambdaBackoffs) {
+                    lambda *= kLMLambdaBackoff;
+                    lambda  = std::max(lambda, 1e-18);
+                    ++lambda_backoffs;
+                    if (opt.verbose)
+                        std::cout << "[LM]  first step below step tolerance ("
+                                  << step_max << " < " << opt.step_tolerance
+                                  << ") -- reducing lambda to " << lambda
+                                  << " and retrying\n";
+                    continue;
+                }
+                if (!accepted_any)
+                    std::cout << "[LM]  Warning: no step above the step "
+                                 "tolerance even at lambda = " << lambda
+                              << " - solver stopped without iterating\n";
                 summ.converged = true;
                 break;
             }
@@ -572,6 +623,7 @@ levenberg_marquardt(Functor&&                    func,
             r.swap(r_try);
             chi2 = chi2_try;
             consecutive_rejects = 0;
+            accepted_any        = true;
 
             /*  Jacobian at the point we just moved to: needed by the next
              *  iteration, and by the uncertainty block if this is the last.  */
