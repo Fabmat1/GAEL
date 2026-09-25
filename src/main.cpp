@@ -19,9 +19,13 @@
 #include <iostream>
 #include <mutex>
 #include <random>
+#include <thread>
 #include <utility>
 
 #include <unistd.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
+#endif
 
 #ifndef GAEL_VERSION_STRING
 #define GAEL_VERSION_STRING "unknown"
@@ -143,6 +147,27 @@ void write_model_dats(const std::string &out_dir, const api::FitResult &result) 
  *  iteration boundary, and run() comes back with Status::Aborted -- so a
  *  remote host that kills the worker still gets a well-formed result file. */
 std::atomic<bool> g_terminate{false};
+
+/*  Peak resident set and CPU time of this process so far, for the result's
+ *  `resources` block.  POSIX only: elsewhere the fields stay "not measured",
+ *  which callers already have to handle.  ru_maxrss is in kilobytes on Linux
+ *  and the BSDs but in bytes on macOS.                                      */
+void measure_process(specfit::api::FitResult::Resources& res)
+{
+#if defined(__unix__) || defined(__APPLE__)
+    rusage ru{};
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return;
+#if defined(__APPLE__)
+    res.peak_rss_bytes = static_cast<long long>(ru.ru_maxrss);
+#else
+    res.peak_rss_bytes = static_cast<long long>(ru.ru_maxrss) * 1024LL;
+#endif
+    auto secs = [](const timeval& t) { return t.tv_sec + t.tv_usec * 1e-6; };
+    res.cpu_seconds = secs(ru.ru_utime) + secs(ru.ru_stime);
+#else
+    (void)res;
+#endif
+}
 extern "C" void gael_on_sigterm(int) { g_terminate.store(true); }
 
 /*  Machine-readable heartbeat for out-of-process monitoring: a small JSON
@@ -343,7 +368,7 @@ int main(int argc, char **argv) {
         auto cli = opts.parse(argc, argv);
         if (cli.count("version")) {
             std::cout << "GAEL " << GAEL_VERSION_STRING
-                      << " api=1 result_json=1\n";
+                      << " api=1 result_json=1 resources=1\n";
             return 0;
         }
         if (cli.count("help") || !cli.count("fit")) {
@@ -444,7 +469,18 @@ int main(int argc, char **argv) {
                 });
         }
 
+        const auto run_started = std::chrono::steady_clock::now();
         auto result = session.run();
+        result.resources.wall_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          run_started).count();
+        {
+            const int t = cli["threads"].as<int>();
+            result.resources.threads =
+                t > 0 ? t
+                      : static_cast<int>(std::thread::hardware_concurrency());
+        }
+        measure_process(result.resources);
 
         /*  The result file is written for every outcome, so a remote monitor
          *  can rely on its appearance alone; the status inside says how the

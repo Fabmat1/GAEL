@@ -312,6 +312,19 @@ struct FitResult {
     std::string              error_message;     // empty if status == Ok
     std::vector<std::string> warnings;
 
+    /*  What the fit cost the process that ran it.  Filled by the CLI, which
+     *  is the whole process; a library caller shares its process with other
+     *  work, so for it these stay at -1 ("not measured").  Remote schedulers
+     *  size memory and time limits from these numbers, which is why they are
+     *  measured by the worker itself rather than read from a scheduler's
+     *  accounting, which not every cluster keeps.                           */
+    struct Resources {
+        double    wall_seconds   = -1.0;
+        double    cpu_seconds    = -1.0;   // user + system
+        long long peak_rss_bytes = -1;
+        int       threads        = 0;
+    } resources;
+
     FitResult();
     ~FitResult();
     FitResult(const FitResult&);

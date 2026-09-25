@@ -159,6 +159,17 @@ void fit_result_to_json_file(const FitResult& r, const std::string& path)
     j["raw_uncertainties"] = r.raw_uncertainties;
     j["raw_free_mask"]     = r.raw_free_mask;
 
+    // Optional: readers from before it existed ignore it, and a result
+    // without it (library callers) reads back as "not measured".
+    if (r.resources.wall_seconds >= 0.0 || r.resources.peak_rss_bytes >= 0) {
+        json rj;
+        rj["wall_seconds"]   = r.resources.wall_seconds;
+        rj["cpu_seconds"]    = r.resources.cpu_seconds;
+        rj["peak_rss_bytes"] = r.resources.peak_rss_bytes;
+        rj["threads"]        = r.resources.threads;
+        j["resources"] = std::move(rj);
+    }
+
     std::ofstream out(path);
     if (!out)
         throw std::runtime_error("cannot write result JSON '" + path + "'");
@@ -233,6 +244,14 @@ FitResult fit_result_from_json_file(const std::string& path)
     r.raw_params        = j.at("raw_params").get<std::vector<double>>();
     r.raw_uncertainties = j.at("raw_uncertainties").get<std::vector<double>>();
     r.raw_free_mask     = j.at("raw_free_mask").get<std::vector<bool>>();
+
+    if (j.contains("resources")) {
+        const json& rj = j["resources"];
+        r.resources.wall_seconds   = rj.value("wall_seconds", -1.0);
+        r.resources.cpu_seconds    = rj.value("cpu_seconds", -1.0);
+        r.resources.peak_rss_bytes = rj.value("peak_rss_bytes", -1LL);
+        r.resources.threads        = rj.value("threads", 0);
+    }
 
     return r;
 }

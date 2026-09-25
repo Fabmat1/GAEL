@@ -145,6 +145,10 @@ static api::FitResult make_fit_result()
     r.raw_params        = {12.5, 13.5, 28123.5};
     r.raw_uncertainties = {0.5, 0.5, 150.25};
     r.raw_free_mask     = {true, true, true};
+    r.resources.wall_seconds   = 12.25;
+    r.resources.cpu_seconds    = 40.5;
+    r.resources.peak_rss_bytes = 3221225472LL;   // 3 GiB, past int32
+    r.resources.threads        = 4;
     return r;
 }
 
@@ -228,6 +232,11 @@ int main()
         CHECK(back.rejected_indices == std::vector<int>{1},
               "rejected indices survive");
         CHECK(back.raw_free_mask.size() == 3, "raw mask survives");
+        CHECK(back.resources.peak_rss_bytes == 3221225472LL &&
+                  back.resources.wall_seconds == 12.25 &&
+                  back.resources.cpu_seconds == 40.5 &&
+                  back.resources.threads == 4,
+              "resources survive");
 
         /*  Failed results serialize too (the CLI writes them on error).  */
         api::FitResult bad;
@@ -239,6 +248,9 @@ int main()
         CHECK(badBack.status == api::Status::InternalError &&
                   badBack.error_message == "boom",
               "failed result round-trips");
+        CHECK(badBack.resources.peak_rss_bytes == -1 &&
+                  badBack.resources.wall_seconds < 0.0,
+              "a result without resources reads back as not measured");
     }
 
     fs::remove_all(dir);
