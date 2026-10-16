@@ -58,6 +58,12 @@ target_link_libraries(test_json_roundtrip PRIVATE GAELcore
 add_test(NAME json_roundtrip COMMAND test_json_roundtrip)
 set_tests_properties(json_roundtrip PROPERTIES TIMEOUT 120 LABELS "unit")
 
+# Fast, hermetic unit test: the Levenberg-Marquardt stopping rules.
+add_executable(test_lm_convergence test_lm_convergence.cpp)
+target_link_libraries(test_lm_convergence PRIVATE GAELcore)
+add_test(NAME lm_convergence COMMAND test_lm_convergence)
+set_tests_properties(lm_convergence PROPERTIES TIMEOUT 120 LABELS "unit")
+
 gael_add_comparison_test(gael_vs_isis_mock test_mock_vs_isis.py)
 gael_add_comparison_test(gael_vs_isis_real test_real_vs_isis.py)
 

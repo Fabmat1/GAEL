@@ -33,6 +33,32 @@ namespace specfit {
  *                (the model change along j, in units of sigma, relative to r)
  *    chi2     :  |predicted reduction| / max(1,chi2) < chi2_tolerance
  *
+ *  The relative chi2 test alone cannot end a large joint fit: with chi2 ~ 1e5
+ *  it asks for steps that improve chi2 by less than 1e-5, below the noise of
+ *  the model interpolation, so such fits ran to the iteration limit and were
+ *  reported as not converged however long they ran.  The residuals are in
+ *  units of sigma, so chi2 itself has an absolute scale: a change of 1 is one
+ *  standard deviation of a single parameter.  Hence also
+ *
+ *    flat     :  chi2_abs_steps accepted steps in a row, each improving chi2
+ *                by less than chi2_abs_tolerance (actual and predicted)
+ *    stalled  :  the solver gives up after max_consecutive_rejects rejected
+ *                steps, and its last accepted step was already flat
+ *
+ *  both of which count as converged: the parameters are then fixed to far
+ *  better than their own uncertainties.  A non-positive chi2_abs_tolerance
+ *  turns both off.
+ *
+ *  A parameter held at one of its bounds by its own gradient (vsini at 0, a
+ *  velocity at the edge of its range, an abundance at the grid's edge) is
+ *  *active*: its descent direction points out of the box, so its gradient can
+ *  never vanish and its unconstrained step is always clipped away.  Such a
+ *  parameter is held fixed in that iteration's step and left out of both
+ *  per-parameter tests -- the bound-constrained (KKT) form of the tests.
+ *  Before, one active parameter kept every fit with it from ever passing
+ *  either test, and the clipped step also spoiled the predicted reduction,
+ *  so good steps were rejected.
+ *
  *  d_j is a natural scale for parameter j and is finite even when x_j == 0,
  *  which a plain relative test on |x_j| is not (vrad and z legitimately sit at
  *  zero).  A column that is identically zero means the parameter cannot move
@@ -65,6 +91,8 @@ struct LMSolverOptions {
     double gradient_tolerance    = 0;        // auto
     double step_tolerance        = 0;        // auto
     double chi2_tolerance        = 0;        // auto
+    double chi2_abs_tolerance    = 1e-2;     // absolute floor, chi2 units; <= 0 off
+    int    chi2_abs_steps        = 3;        // flat accepted steps in a row
     double initial_lambda        = 0;        // auto
     int    max_consecutive_rejects = 12;     // give up when LM cannot progress
     bool   verbose               = false;    // chatty?
@@ -414,6 +442,14 @@ levenberg_marquardt(Functor&&                    func,
 
     int consecutive_rejects = 0;
 
+    std::vector<char> active;          // per free parameter: held at a bound
+    Eigen::VectorXd   g_step;          // g with the active entries zeroed
+
+    /*  The absolute chi2 test (see header): accepted steps in a row that
+     *  were flat, and the improvement of the last accepted step.           */
+    int    flat_steps = 0;
+    double last_gain  = std::numeric_limits<double>::infinity();
+
     /*  Whether the solver has ever managed to move, and how often the damping
      *  has been backed off because it had not.  See the step test below.    */
     bool accepted_any    = false;
@@ -478,10 +514,25 @@ levenberg_marquardt(Functor&&                    func,
          *  the residual vector and column j; it is dimensionless, so the
          *  same threshold is meaningful for Teff, log g and a continuum
          *  anchor alike, and *every* free parameter has to pass it.      */
+        /*  Active bounds (see header): on a bound, with the descent
+         *  direction -g pointing out of the box.                         */
+        active.assign(n_free, 0);
+        for (int j = 0; j < n; ++j) {
+            const int c = col_index[j];
+            if (c < 0) continue;
+            const auto on = [&](double b) {
+                return std::abs(x[j] - b) <= 1e-12 * std::max(1.0, std::abs(b));
+            };
+            const bool at_lo = !lower.empty() && on(lower[j]);
+            const bool at_hi = !upper.empty() && on(upper[j]);
+            if ((at_lo && g[c] > 0.0) || (at_hi && g[c] < 0.0)) active[c] = 1;
+        }
+
         const double rnorm = std::sqrt(chi2);
         double cos_max = 0.0;
         if (rnorm > 0.0) {
             for (int c = 0; c < n_free; ++c) {
+                if (active[c]) continue;
                 const double dj = std::sqrt(diag_JTJ[c]);
                 if (!(dj > 0.0)) continue;         // column ≡ 0: cannot move
                 cos_max = std::max(cos_max, std::abs(g[c]) / (dj * rnorm));
@@ -503,7 +554,18 @@ levenberg_marquardt(Functor&&                    func,
         JTJ.diagonal().array() +=
             lambda * (diag_JTJ.array() + 1e-20);   // Fletcher scaling
 
-        dx_free = -JTJ.ldlt().solve(g);            // SPD solve
+        /*  Active parameters stay where they are: their rows and columns
+         *  are decoupled and their right-hand side zeroed, so dx_c = 0.   */
+        g_step = g;
+        for (int c = 0; c < n_free; ++c) {
+            if (!active[c]) continue;
+            JTJ.row(c).setZero();
+            JTJ.col(c).setZero();
+            JTJ(c, c) = 1.0;
+            g_step[c] = 0.0;
+        }
+
+        dx_free = -JTJ.ldlt().solve(g_step);       // SPD solve
 
         if (dx_free.hasNaN() || !dx_free.allFinite()){   // numerical failure
             std::cout << "[LM]  Warning: numerical failure! Inf/NaN in solver. Aborting iteration...\n";
@@ -530,9 +592,10 @@ levenberg_marquardt(Functor&&                    func,
             double step_max = 0.0;
             const double rnorm_s = std::max(std::sqrt(chi2), eps);
             for (int c = 0; c < n_free; ++c)
-                step_max = std::max(step_max,
-                                    std::sqrt(diag_JTJ[c]) * std::abs(dx_free[c])
-                                        / rnorm_s);
+                if (!active[c])
+                    step_max = std::max(step_max,
+                                        std::sqrt(diag_JTJ[c]) * std::abs(dx_free[c])
+                                            / rnorm_s);
             if (step_max < opt.step_tolerance) {
                 /*  A step this small means "x is stationary" only once the
                  *  solver has actually been somewhere.  At the starting
@@ -610,11 +673,12 @@ levenberg_marquardt(Functor&&                    func,
             std::cout << "[LM] Calculated candidate. Powell test." << std::endl;
 
         /* ------------------- Powell's ρ test ------------------------ */
-        Eigen::VectorXd tmp = lambda * (diag_JTJ.array() * dx_free.array()).matrix() - g;
+        Eigen::VectorXd tmp = lambda * (diag_JTJ.array() * dx_free.array()).matrix() - g_step;
         double pred_red = 0.5 * dx_free.dot(tmp);
         if (pred_red <= 0.0) pred_red = eps;
 
-        double rho     = (chi2 - chi2_try) / pred_red;
+        const double gain = chi2 - chi2_try;
+        double rho     = gain / pred_red;
         bool   accept  = rho > 0.0 && chi2_try < chi2;
 
         if (accept) {
@@ -647,6 +711,16 @@ levenberg_marquardt(Functor&&                    func,
                 summ.converged = true;
                 break;
             }
+            last_gain = gain;
+            if (opt.chi2_abs_tolerance > 0.0 && gain < opt.chi2_abs_tolerance &&
+                std::abs(pred_red) < opt.chi2_abs_tolerance) {
+                if (++flat_steps >= std::max(1, opt.chi2_abs_steps)) {
+                    summ.converged = true;
+                    break;
+                }
+            } else {
+                flat_steps = 0;
+            }
         } else {
             /* ------------------- rejected step --------------------- */
             lambda *= 2.0;
@@ -662,8 +736,15 @@ levenberg_marquardt(Functor&&                    func,
                improvement: the model cannot be improved from here (usually
                finite-difference noise in the Jacobian), so stop rather than
                burn the whole iteration budget on rejected steps.        */
-            if (consecutive_rejects >= opt.max_consecutive_rejects)
+            if (consecutive_rejects >= opt.max_consecutive_rejects) {
+                /*  Stalled where the last accepted step was already flat:
+                    the minimum is pinned to the precision the Jacobian
+                    allows, which is all a further step could add.         */
+                if (opt.chi2_abs_tolerance > 0.0 && accepted_any &&
+                    last_gain < opt.chi2_abs_tolerance)
+                    summ.converged = true;
                 break;
+            }
         }
     }
 
