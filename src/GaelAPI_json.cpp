@@ -43,6 +43,7 @@ GlobalSettings global_settings_from_json_file(const std::string& path)
     get_d("convRangeLo",    gs.conv_range_lo);
     get_d("convRangeHi",    gs.conv_range_hi);
     get_d("convFraction",   gs.conv_fraction);
+    get_d("lmIterationScale", gs.lm_iteration_scale);
     get_i("contJitterK",    gs.cont_jitter_K);
 
     get_b("autoFreezeSurRatio", gs.auto_freeze_sur_ratio);
@@ -191,6 +192,7 @@ void global_settings_to_json_file(const GlobalSettings& gs,
     s["convRangeLo"]     = gs.conv_range_lo;
     s["convRangeHi"]     = gs.conv_range_hi;
     s["convFraction"]    = gs.conv_fraction;
+    s["lmIterationScale"] = gs.lm_iteration_scale;
     s["contJitterK"]     = gs.cont_jitter_K;
     s["autoFreezeSurRatio"]   = gs.auto_freeze_sur_ratio;
     s["surRatioThres"]        = gs.sur_ratio_thres;

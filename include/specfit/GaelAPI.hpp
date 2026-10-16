@@ -68,6 +68,11 @@ struct GlobalSettings {
     double conv_range_hi  = 1.1;
     double conv_fraction  = 0.9;
 
+    /*  Scales the Levenberg-Marquardt iteration budget of every fitting stage
+     *  (100-200 iterations each at 1.0).  A fit that hits a stage's budget is
+     *  reported as not converged; joint fits of many spectra often do.      */
+    double lm_iteration_scale = 1.0;
+
     // Continuum-placement systematic: refit cont_jitter_K times with jittered
     // cspline anchors and fold the stellar-parameter scatter into the reported
     // errors in quadrature.  On by default; set 0 to disable (faster fitting).

@@ -248,7 +248,7 @@ double UnifiedFitWorkflow::solve_cost(const std::set<std::string>& free_params,
 
 double UnifiedFitWorkflow::estimated_quick_refit_cost(int max_iterations) const
 {
-    return solve_cost({ "continuum", "telluric" }, 100)
+    return solve_cost({ "continuum", "telluric" }, iteration_budget(100))
          + solve_cost({ "all", "continuum" }, max_iterations);
 }
 
@@ -641,7 +641,7 @@ void UnifiedFitWorkflow::stage1_continuum_only() {
     /*  ISIS's "First guess for the continuum" freezes only `stellar(1).*`
      *  and fits everything else that is free -- which includes the telluric
      *  parameters (spectroscopy_automated.sl ~972).                        */
-    solve_stage( { "continuum", "telluric" }, 100 );
+    solve_stage( { "continuum", "telluric" }, iteration_budget(100) );
 }
 
 std::set<std::string> UnifiedFitWorkflow::free_params_stage2() const {
@@ -652,7 +652,7 @@ std::set<std::string> UnifiedFitWorkflow::free_params_stage2() const {
 }
 
 void UnifiedFitWorkflow::stage2_continuum_vrad() {
-    solve_stage(free_params_stage2(), 100);
+    solve_stage(free_params_stage2(), iteration_budget(100));
 }
 
 
@@ -668,13 +668,13 @@ std::set<std::string> UnifiedFitWorkflow::free_params_stage3() const {
 }
 
 void UnifiedFitWorkflow::stage3_continuum_vrad_teff_logg_z() {
-    solve_stage(free_params_stage3(), 150);
+    solve_stage(free_params_stage3(), iteration_budget(150));
 }
 
 
 void UnifiedFitWorkflow::stage4_full(bool add_powell) {
     std::set<std::string> fp = { "all", "continuum" };
-    solve_stage(fp, 200, add_powell);
+    solve_stage(fp, iteration_budget(200), add_powell);
 }
 
 
@@ -696,7 +696,7 @@ void UnifiedFitWorkflow::quick_refit(int max_iterations)
         const auto ids = config_.progress->expand(
             config_.progress_phase,
             { { "refit", pre + " \xc2\xb7 continuum",
-                solve_cost(fp_cont, 100) },
+                solve_cost(fp_cont, iteration_budget(100)) },
               { "refit", pre + " \xc2\xb7 joint solve",
                 solve_cost(fp_all, max_iterations) } });
         if (ids.size() == 2) { ph_cont = ids[0]; ph_joint = ids[1]; }
@@ -789,9 +789,9 @@ void UnifiedFitWorkflow::stage5_auto_freeze_vsini()
     // Run a fit with vsini frozen
     std::set<std::string> fp = { "all", "continuum" };
     if (config_.progress)
-        config_.progress->set_weight(phase_.stage5, solve_cost(fp, 100));
+        config_.progress->set_weight(phase_.stage5, solve_cost(fp, iteration_budget(100)));
     enter_phase(phase_.stage5, "refitting with vsini frozen");
-    solve_stage(fp, 100);
+    solve_stage(fp, iteration_budget(100));
     leave_phase();
 }
 
@@ -886,9 +886,9 @@ void UnifiedFitWorkflow::stage5b_auto_freeze_sur_ratio()
 
     const std::set<std::string> fp = { "all", "continuum" };
     if (config_.progress)
-        config_.progress->set_weight(phase_.stage5b, solve_cost(fp, 100));
+        config_.progress->set_weight(phase_.stage5b, solve_cost(fp, iteration_budget(100)));
     enter_phase(phase_.stage5b, "refitting without the retired component");
-    solve_stage(fp, 100);
+    solve_stage(fp, iteration_budget(100));
     leave_phase();
 }
 
@@ -1128,7 +1128,7 @@ void UnifiedFitWorkflow::stage7_final() {
     if (config_.progress)
         config_.progress->set_weight(
             phase_.stage7_boundary,
-            solve_cost({ "all", "continuum" }, 200));
+            solve_cost({ "all", "continuum" }, iteration_budget(200)));
     enter_phase(phase_.stage7_boundary,
                 "refitting with " + std::to_string(boundary_params.size()) +
                 " boundary parameter(s) frozen");
@@ -1222,19 +1222,19 @@ void UnifiedFitWorkflow::plan_stages(bool do_1, bool do_23, bool do_6)
 
     if (do_1)
         push(S1, "Stage 1 \xc2\xb7 continuum pre-fit",
-             solve_cost(fp_cont, 100));
+             solve_cost(fp_cont, iteration_budget(100)));
     if (do_23) {
         push(S2, "Stage 2 \xc2\xb7 continuum + v_rad",
-             solve_cost(free_params_stage2(), 100));
+             solve_cost(free_params_stage2(), iteration_budget(100)));
         push(S3, "Stage 3 \xc2\xb7 continuum + v_rad + T_eff + log g + [M/H]",
-             solve_cost(free_params_stage3(), 150));
+             solve_cost(free_params_stage3(), iteration_budget(150)));
     }
-    push(S4, "Stage 4 \xc2\xb7 first full fit", solve_cost(fp_all, 200));
+    push(S4, "Stage 4 \xc2\xb7 first full fit", solve_cost(fp_all, iteration_budget(200)));
     push(S5, "Stage 5 \xc2\xb7 refit with v sin i frozen",
-         kConditionalPrior * solve_cost(fp_all, 100));
+         kConditionalPrior * solve_cost(fp_all, iteration_budget(100)));
     if (config_.auto_freeze_sur_ratio && model_.params.size() > 1)
         push(S5B, "Stage 5b \xc2\xb7 refit without the retired component",
-             kConditionalPrior * solve_cost(fp_all, 100));
+             kConditionalPrior * solve_cost(fp_all, iteration_budget(100)));
 
     /*  Stage 6 is one phase per IRLS pass.  Each pass rescales sigma from the
      *  local scatter of every spectrum (a model evaluation apiece, plus the
@@ -1253,9 +1253,9 @@ void UnifiedFitWorkflow::plan_stages(bool do_1, bool do_23, bool do_6)
                          pass_weight });
     }
 
-    push(S7,  "Stage 7 \xc2\xb7 final fit", solve_cost(fp_all, 200));
+    push(S7,  "Stage 7 \xc2\xb7 final fit", solve_cost(fp_all, iteration_budget(200)));
     push(S7B, "Stage 7 \xc2\xb7 refit with boundary parameters frozen",
-         kConditionalPrior * solve_cost(fp_all, 200));
+         kConditionalPrior * solve_cost(fp_all, iteration_budget(200)));
 
     const std::vector<int> ids = pr->expand(config_.progress_phase, plan);
     if (ids.size() != plan.size()) return;      // placeholder had gone

@@ -637,6 +637,7 @@ FitResult GaelSession::run_impl()
     wcfg.conv_range_lo     = gs.conv_range_lo;
     wcfg.conv_range_hi     = gs.conv_range_hi;
     wcfg.conv_fraction     = gs.conv_fraction;
+    wcfg.lm_iteration_scale = gs.lm_iteration_scale;
     wcfg.auto_freeze_sur_ratio = gs.auto_freeze_sur_ratio;
     wcfg.sur_ratio_thres   = gs.sur_ratio_thres;
     wcfg.c2_detection_thres= gs.c2_detection_thres;

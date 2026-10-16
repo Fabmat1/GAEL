@@ -6,6 +6,8 @@
 #include "ModelGrid.hpp"
 #include "SimpleLM.hpp"
 #include <vector>
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <set>
 #include <map>
@@ -33,6 +35,10 @@ public:
         double conv_range_lo            = 0.9;
         double conv_range_hi            = 1.1;
         double conv_fraction            = 0.9;
+
+        /*  Multiplies each stage's LM iteration budget; see
+         *  GlobalSettings::lm_iteration_scale.                              */
+        double lm_iteration_scale       = 1.0;
 
         /*  ISIS's auto_freeze_sur_ratio (on by default there, off here --
          *  GAEL only ever drops a component the user asked for if the user
@@ -124,6 +130,14 @@ public:
     { return telluric_param_offset(d); }
 
 private:
+    /*  A stage's LM iteration budget: its base value times
+     *  config_.lm_iteration_scale, never below the base.                    */
+    int iteration_budget(int base) const {
+        const double s = std::isfinite(config_.lm_iteration_scale)
+                             ? config_.lm_iteration_scale : 1.0;
+        return std::max(base, static_cast<int>(std::lround(base * s)));
+    }
+
     void solve_stage(const std::set<std::string>& free_params,
                      int                          max_iterations,
                      bool                         add_powell = false);
