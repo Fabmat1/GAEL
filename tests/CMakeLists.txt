@@ -51,6 +51,12 @@ target_link_libraries(test_grid_provider PRIVATE GAELcore)
 add_test(NAME grid_provider COMMAND test_grid_provider)
 set_tests_properties(grid_provider PROPERTIES TIMEOUT 120 LABELS "unit")
 
+# Fast, hermetic unit test: cgroup v1/v2 limits and headroom for the budget.
+add_executable(test_memory_budget test_memory_budget.cpp)
+target_link_libraries(test_memory_budget PRIVATE GAELcore)
+add_test(NAME memory_budget COMMAND test_memory_budget)
+set_tests_properties(memory_budget PROPERTIES TIMEOUT 60 LABELS "unit")
+
 # Fast, hermetic unit test: JSON round trips for out-of-process fitting.
 add_executable(test_json_roundtrip test_json_roundtrip.cpp)
 target_link_libraries(test_json_roundtrip PRIVATE GAELcore

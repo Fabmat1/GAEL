@@ -64,43 +64,102 @@ std::size_t mem_available()
     return 0;
 }
 
-/*  The cgroup's limit, which is what actually kills the process in a
- *  container or under a systemd scope -- MemAvailable there still reports the
- *  host's.  v2 first, then v1.                                              */
-std::size_t cgroup_limit()
+/*  Value of `key` in a memory.stat file (one "key value" pair per line). */
+std::size_t read_stat(const std::string& path, const std::string& key)
 {
-    std::size_t best = 0;
-    auto take = [&best](std::size_t v) {
-        /*  memory.max on a machine with no limit reads as a number close to
-         *  SIZE_MAX rather than "max" on some kernels; treat anything past a
-         *  petabyte as "no limit".                                          */
-        if (v == 0 || v > (1ull << 50)) return;
-        if (best == 0 || v < best) best = v;
+    std::ifstream f(path);
+    std::string k;
+    unsigned long long v = 0;
+    while (f >> k >> v)
+        if (k == key) return static_cast<std::size_t>(v);
+    return 0;
+}
+
+/*  memory.max on a machine with no limit reads as a number close to SIZE_MAX
+ *  rather than "max" on some kernels, and cgroup v1 always does; treat
+ *  anything past a petabyte as "no limit".                                   */
+bool is_limit(std::size_t v) { return v != 0 && v <= (1ull << 50); }
+
+} // namespace
+
+/*  The memory cgroups that bound this process: its own and every ancestor,
+ *  since the tightest of them is the one that applies, for whichever of the
+ *  two hierarchies carries the memory controller.
+ *
+ *  v2 is the "0::<path>" line.  v1 has one line per hierarchy, and the
+ *  memory controller's is "<n>:memory:<path>" (possibly co-mounted, as in
+ *  "memory,cpu").  Reading only the v1 root, as this once did, sees the
+ *  host's unlimited root group: under Slurm on a v1 host the job's limit
+ *  sits five levels down (slurm/uid_<u>/job_<j>/step_<s>/task_<t>), and the
+ *  budget was sized as if the job had the whole node.                       */
+MemoryBudget::CgroupMemory
+MemoryBudget::cgroup_memory(const std::string& proc_cgroup,
+                            const std::string& sysfs)
+{
+    CgroupMemory best;
+
+    auto consider = [&best](const std::string& dir, bool v2) {
+        std::size_t limit = 0;
+        auto tighter = [&limit](std::size_t v) {
+            if (is_limit(v) && (limit == 0 || v < limit)) limit = v;
+        };
+        if (v2) {
+            tighter(read_first_number(dir + "/memory.max"));
+            tighter(read_first_number(dir + "/memory.high"));
+        } else {
+            tighter(read_first_number(dir + "/memory.limit_in_bytes"));
+        }
+        if (limit == 0) return;
+
+        /*  Usage counts the page cache, and a fit that streams its grid
+         *  through the page cache would look full long before it is.  The
+         *  inactive file pages are what the kernel reclaims first, so they
+         *  come off, the way `docker stats` reports a container's memory.    */
+        const std::size_t usage = read_first_number(
+            dir + (v2 ? "/memory.current" : "/memory.usage_in_bytes"));
+        const std::size_t inactive =
+            v2 ? read_stat(dir + "/memory.stat", "inactive_file")
+               : read_stat(dir + "/memory.stat", "total_inactive_file");
+        const std::size_t used     = usage > inactive ? usage - inactive : 0;
+        const std::size_t headroom = limit > used ? limit - used : 0;
+
+        if (best.limit == 0 || headroom < best.headroom) {
+            best.limit    = limit;
+            best.headroom = headroom;
+        }
     };
 
-    /*  cgroup v2: the process's own cgroup, and every ancestor, since the
-     *  tightest of them is the one that applies.                            */
-    std::ifstream self("/proc/self/cgroup");
+    std::ifstream self(proc_cgroup);
     std::string line;
     while (std::getline(self, line)) {
-        const auto pos = line.rfind("::");
-        if (pos == std::string::npos) continue;
-        std::string rel = line.substr(pos + 2);
-        while (!rel.empty()) {
-            take(read_first_number("/sys/fs/cgroup" + rel + "/memory.max"));
-            take(read_first_number("/sys/fs/cgroup" + rel + "/memory.high"));
+        const auto c1 = line.find(':');
+        const auto c2 = c1 == std::string::npos ? c1 : line.find(':', c1 + 1);
+        if (c2 == std::string::npos) continue;
+        const std::string controllers = line.substr(c1 + 1, c2 - c1 - 1);
+        std::string rel = line.substr(c2 + 1);
+
+        bool v2 = controllers.empty();
+        if (!v2) {
+            bool memory = false;
+            std::istringstream is(controllers);
+            for (std::string c; std::getline(is, c, ',');)
+                memory = memory || c == "memory";
+            if (!memory) continue;
+        }
+        const std::string base = sysfs + (v2 ? "" : "/memory");
+
+        while (!rel.empty() && rel != "/") {
+            consider(base + rel, v2);
             const auto slash = rel.rfind('/');
             if (slash == std::string::npos || slash == 0) break;
             rel = rel.substr(0, slash);
         }
-        take(read_first_number("/sys/fs/cgroup/memory.max"));
+        consider(base, v2);
     }
-
-    /*  cgroup v1. */
-    take(read_first_number("/sys/fs/cgroup/memory/memory.limit_in_bytes"));
-
     return best;
 }
+
+namespace {
 
 } // namespace
 
@@ -125,9 +184,9 @@ std::size_t MemoryBudget::parse_size(const std::string& s)
 std::size_t MemoryBudget::available_ram()
 {
     const std::size_t avail = mem_available();
-    const std::size_t cg    = cgroup_limit();
-    if (avail && cg) return std::min(avail, cg);
-    return avail ? avail : cg;
+    const CgroupMemory cg   = cgroup_memory();
+    if (avail && cg.limit) return std::min(avail, cg.headroom);
+    return cg.limit ? cg.headroom : avail;
 }
 
 MemoryBudget::MemoryBudget()
@@ -187,12 +246,25 @@ void MemoryBudget::refresh_pressure_() const
                                                  std::memory_order_relaxed))
         return;                         // another thread is doing it
 
-    const std::size_t free_now = available_ram();
-    if (free_now == 0) return;          // nothing to go on: leave it alone
+    const std::size_t avail = mem_available();
+    const CgroupMemory cg   = cgroup_memory();
+    const std::size_t free_now =
+        cg.limit ? (avail ? std::min(avail, cg.headroom) : cg.headroom) : avail;
+    if (free_now == 0 && cg.limit == 0) return;   // nothing to go on
+
+    /*  The marks are for a desktop.  In a 4 GB batch slot "1.5 GB free" is
+     *  over a third of everything the job may hold, and a valve that opened
+     *  there would never close; so under a cgroup limit they shrink with it,
+     *  to the same fraction of the limit they are of a typical 10 GB box.    */
+    std::size_t low = kPressureLow, high = kPressureHigh;
+    if (cg.limit) {
+        low  = std::min(low,  cg.limit * 15 / 100);
+        high = std::min(high, cg.limit * 30 / 100);
+    }
 
     double s = scale_.load(std::memory_order_relaxed);
-    if      (free_now < kPressureLow)  s = std::max(kMinScale, s * kShrink);
-    else if (free_now > kPressureHigh) s = std::min(1.0,       s * kRecover);
+    if      (free_now < low)  s = std::max(kMinScale, s * kShrink);
+    else if (free_now > high) s = std::min(1.0,       s * kRecover);
     else                               return;      // in the dead band
     scale_.store(s, std::memory_order_relaxed);
 }

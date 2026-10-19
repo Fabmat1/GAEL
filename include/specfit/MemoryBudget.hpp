@@ -66,11 +66,24 @@ public:
     std::size_t rotational_weights() const;   // RotationalConvolution
     std::size_t resolution_weights() const;   // Resolution
 
-    /*  Physical memory this process may actually use: the smallest of
-     *  MemAvailable and any cgroup limit, in bytes.  Swap deliberately does
-     *  not count -- a fit that swaps has already cost more than rebuilding
-     *  every table it holds.  0 when nothing could be determined.          */
+    /*  Physical memory this process may still take: the smaller of
+     *  MemAvailable and what its tightest memory cgroup has left, in bytes.
+     *  Swap deliberately does not count -- a fit that swaps has already cost
+     *  more than rebuilding every table it holds.  0 when nothing could be
+     *  determined.                                                          */
     static std::size_t available_ram();
+
+    /*  The tightest memory cgroup over this process (v1 or v2): its limit,
+     *  and how much of it is still free, page cache that can be reclaimed
+     *  counted as free.  limit == 0 when no cgroup limits the process.  The
+     *  paths are parameters only so the tests can point it at a fake tree. */
+    struct CgroupMemory {
+        std::size_t limit    = 0;
+        std::size_t headroom = 0;
+    };
+    static CgroupMemory cgroup_memory(
+        const std::string& proc_cgroup = "/proc/self/cgroup",
+        const std::string& sysfs       = "/sys/fs/cgroup");
 
     /*  "4G", "512M", "2048" -- a bare number is MiB, matching --cache-mem.
      *  0 when the text is not a size, which the caller reports rather than
