@@ -99,6 +99,15 @@ public:
     Vector get_component_model_for_dataset(std::size_t dataset_idx,
                                            int component) const;
 
+    /*  Each component's share of the light on the dataset's wavelength grid,
+     *  in component order: w_k = s_k C_k / sum_j s_j C_j, the same weights the
+     *  composite model mixes the normalised fluxes with.  They sum to 1 at
+     *  every point (0 everywhere where no component emits), so
+     *  sum_k w_k * component_model_k is the composite model.  A single
+     *  component gets one vector of ones.                                    */
+    std::vector<Vector> get_light_fractions_for_dataset(
+        std::size_t dataset_idx) const;
+
     /*  Lower/upper solver limit of every entry of the global parameter vector;
      *  continuum and telluric entries report +-inf.  Lets a consumer see which
      *  side of its range a converged parameter is pinned against -- an

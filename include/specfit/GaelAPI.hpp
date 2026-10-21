@@ -272,6 +272,15 @@ struct SpectrumResult {
      *  entry equals `model`.                                                 */
     std::vector<Vector> component_models;
 
+    /*  Each component's share of the light on the same lambda grid, in
+     *  component order: w_k = s_k C_k / sum_j s_j C_j from the surface ratios
+     *  and the flux-calibrated model continua -- the weights the composite is
+     *  built with.  They sum to 1 at every point, and
+     *  sum_k light_fractions[k] * component_models[k] == model, which is what
+     *  a consumer needs to draw each component as its contribution.  One
+     *  vector of ones for a single-component fit.                            */
+    std::vector<Vector> light_fractions;
+
     // continuum-spline anchors
     Vector cont_x;
     Vector cont_y;

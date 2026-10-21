@@ -804,6 +804,7 @@ FitResult GaelSession::run_impl()
         S.component_models.reserve((std::size_t)n_comp);
         for (int c = 0; c < n_comp; ++c)
             S.component_models.push_back(wf.get_component_model_for_dataset(d, c));
+        S.light_fractions = wf.get_light_fractions_for_dataset(d);
 
         Eigen::Map<const Vector> cy(
             R.raw_params.data() + cont_block_start + cs,

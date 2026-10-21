@@ -127,6 +127,7 @@ static api::FitResult make_fit_result()
     s.model      = vec({0.99, 0.985, 0.972});
     s.continuum  = vec({1.0, 1.0, 1.0});
     s.component_models = {vec({0.99, 0.985, 0.972})};
+    s.light_fractions  = {vec({1.0, 1.0, 1.0})};
     s.cont_x     = vec({4000.0, 4002.0});
     s.cont_y     = vec({1.0, 1.0});
     s.telluric   = vec({});
@@ -229,6 +230,9 @@ int main()
         CHECK(back.spectra[0].lambda.size() == 3 &&
                   back.spectra[0].lambda[2] == 4002.0,
               "spectrum arrays survive");
+        CHECK(back.spectra[0].light_fractions.size() == 1 &&
+                  back.spectra[0].light_fractions[0].size() == 3,
+              "light fractions survive");
         CHECK(back.rejected_indices == std::vector<int>{1},
               "rejected indices survive");
         CHECK(back.raw_free_mask.size() == 3, "raw mask survives");

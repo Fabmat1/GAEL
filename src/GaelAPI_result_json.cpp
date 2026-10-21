@@ -145,6 +145,9 @@ void fit_result_to_json_file(const FitResult& r, const std::string& path)
         json cm = json::array();
         for (const auto& m : s.component_models) cm.push_back(vec_to_json(m));
         sj["component_models"] = std::move(cm);
+        json lf = json::array();
+        for (const auto& w : s.light_fractions) lf.push_back(vec_to_json(w));
+        sj["light_fractions"] = std::move(lf);
         sj["cont_x"]          = vec_to_json(s.cont_x);
         sj["cont_y"]          = vec_to_json(s.cont_y);
         sj["telluric"]        = vec_to_json(s.telluric);
@@ -230,6 +233,10 @@ FitResult fit_result_from_json_file(const std::string& path)
         s.continuum       = vec_from_json(sj.at("continuum"));
         for (const auto& m : sj.at("component_models"))
             s.component_models.push_back(vec_from_json(m));
+        /*  Absent from results written before the fractions were exported. */
+        if (sj.contains("light_fractions"))
+            for (const auto& w : sj.at("light_fractions"))
+                s.light_fractions.push_back(vec_from_json(w));
         s.cont_x          = vec_from_json(sj.at("cont_x"));
         s.cont_y          = vec_from_json(sj.at("cont_y"));
         s.telluric        = vec_from_json(sj.at("telluric"));

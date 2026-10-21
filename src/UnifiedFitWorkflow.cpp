@@ -1360,6 +1360,41 @@ Vector UnifiedFitWorkflow::get_component_model_for_dataset(size_t dataset_idx,
     return model_for_dataset(dataset_idx, component);
 }
 
+/*  The weights are formed from the model continua and the surface ratios only
+ *  -- exactly the denominator of the composite -- so a consumer drawing the
+ *  components never has to guess them back out of the line profiles.  The
+ *  fitted spline and the telluric multiply every component alike and so do
+ *  not enter.                                                               */
+std::vector<Vector>
+UnifiedFitWorkflow::get_light_fractions_for_dataset(size_t dataset_idx) const
+{
+    if (dataset_idx >= datasets_.size())
+        throw std::out_of_range("Invalid dataset index");
+
+    const auto& ds       = datasets_[dataset_idx];
+    const int   n_points = ds.obs.lambda.size();
+    const int   n_comp   = static_cast<int>(model_.grids.size());
+
+    if (n_comp < 2) return { Vector::Ones(n_points) };
+
+    const int didx = static_cast<int>(dataset_idx);
+    std::vector<Vector> w(n_comp);
+    Vector den = Vector::Zero(n_points);
+    for (int c = 0; c < n_comp; ++c) {
+        const StellarParams sp = stellar_params_from(indexer_, unified_params_,
+                                                     c, didx);
+        const Spectrum synth = compute_synthetic(
+            model_.grids[c], sp, ds.obs.lambda,
+            ds.resOffset, ds.resSlope, /*with_continuum=*/true);
+        w[c] = sp.sur_ratio * synth.cont;
+        den += w[c];
+    }
+    for (int c = 0; c < n_comp; ++c)
+        for (int i = 0; i < n_points; ++i)
+            w[c][i] = (den[i] > 0.0) ? w[c][i] / den[i] : 0.0;
+    return w;
+}
+
 Vector UnifiedFitWorkflow::model_for_dataset(size_t dataset_idx,
                                              int only_component) const {
     if (dataset_idx >= datasets_.size()) {
