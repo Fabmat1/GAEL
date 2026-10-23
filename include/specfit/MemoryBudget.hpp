@@ -36,26 +36,75 @@ class MemoryBudget {
 public:
     static MemoryBudget& instance();
 
-    /*  set_total and set_reserved are setup-time calls -- the CLI before the
-     *  fit starts, GaelAPI once the datasets are known -- and are not
-     *  synchronised against the readers.  Everything the caches touch while
-     *  a fit is running is read-only or atomic.                            */
+    /*  Every member is atomic or fixed at construction: a host that runs
+     *  fits side by side in one process (ASTRA's mass fits, one session per
+     *  star) starts and finishes them while the others' caches are reading
+     *  the budget.                                                         */
 
     /*  Bytes all GAEL caches together may hold, after the fit's own
      *  non-cache footprint (see set_reserved) has been taken off.          */
     std::size_t total() const;
 
     /*  Explicit override; 0 restores the automatic value.  Set from
-     *  --mem-budget, from GaelSession, or from GAEL_MEM_BUDGET.            */
+     *  --mem-budget, from GaelSession, or from GAEL_MEM_BUDGET.  It is the
+     *  ceiling for the whole process, however many fits are running in it. */
     void set_total(std::size_t bytes);
 
-    /*  What the fit will hold *outside* the caches and cannot shrink: the
-     *  Jacobian, the per-thread residual scratch, the observed spectra.
-     *  Known once the datasets and the free-parameter set are (GaelAPI.cpp),
-     *  and subtracted from the total, which is the difference between a
-     *  cache budget that leaves room for the solver and one that does not.  */
-    void set_reserved(std::size_t bytes);
+    /* ---- fits in flight ---------------------------------------------- *
+     *  The caches are one per process, so every fit running in it draws on
+     *  them at once.  The automatic figures were all chosen for one fit --
+     *  the 128 MiB model cache, the 8 GiB ceiling, the weight tables' entry
+     *  caps -- which is right for gael-worker and wrong for a host running
+     *  fits side by side in one process: 24 synthe fits sharing one fit's
+     *  room each kept ~5 MiB of model spectra and too few weight tables, and
+     *  spent ~35x longer rebuilding what they had just evicted from one
+     *  another than the same fits did as separate processes.
+     *
+     *  So each fit holds one of these for as long as it runs, and the
+     *  per-fit figures are multiplied by the number held.  What the machine
+     *  has free still caps the total (auto_total), so on a laptop the fits
+     *  share what there is rather than each being promised a process's
+     *  worth; with one fit in flight nothing changes.
+     *
+     *  The figures follow the *current* count, so they come back down as
+     *  fits finish, and each cache gives the memory back on its next insert
+     *  rather than at once.                                                */
+    class Fit {
+    public:
+        Fit();
+        ~Fit();
+        Fit(const Fit&)            = delete;
+        Fit& operator=(const Fit&) = delete;
+
+        /*  What this fit holds *outside* the caches and cannot shrink: the
+         *  Jacobian, the per-thread residual scratch, the observed spectra.
+         *  Known once the datasets and the free-parameter set are
+         *  (GaelAPI.cpp).  It replaces this fit's previous reservation, adds
+         *  to those of the other fits in flight, and is released with the
+         *  scope.                                                          */
+        void reserve(std::size_t bytes);
+
+    private:
+        std::size_t reserved_ = 0;
+    };
+
+    /*  Fits in flight, never less than one: a cache used outside any fit
+     *  (a test, a tool) gets one fit's worth.                              */
+    int fits() const;
+
+    /*  An entry cap chosen for one fit, scaled to the fits in flight.  The
+     *  weight tables are one entry per (grid, spectrograph) pair of each fit
+     *  and are cycled round-robin, the pattern LRU handles worst, so a cap
+     *  that every fit shares is a cap that every fit misses.               */
+    std::size_t entry_cap(std::size_t per_fit) const;
+
+    /*  Sum of the reservations of the fits in flight.                      */
     std::size_t reserved() const;
+
+    /*  The automatic total for `fits` fits on a machine with `available`
+     *  bytes free (available_ram()), before reservations and the pressure
+     *  valve.  Static and public so the tests can ask about any machine.  */
+    static std::size_t auto_total(std::size_t available, int fits);
 
     /* ---- per-cache shares ------------------------------------------- *
      *  Weights, not guarantees: a cache that never fills its share simply
@@ -100,7 +149,8 @@ public:
 private:
     MemoryBudget();
 
-    std::size_t auto_total_() const;
+    /*  The least the caches may be cut to, given the gross budget.        */
+    std::size_t floor_(std::size_t gross) const;
 
     /* ---- pressure valve --------------------------------------------- *
      *  Everything above is a prediction, and the predictions do not cover
@@ -121,9 +171,10 @@ private:
      *  budget on every insert.                                            */
     void   refresh_pressure_() const;
 
-    std::size_t detected_    = 0;   // available_ram() at construction
-    std::size_t explicit_    = 0;   // 0 == automatic
-    std::size_t reserved_    = 0;
+    std::size_t                      detected_ = 0;  // available_ram() at construction
+    std::atomic<std::size_t>         explicit_ {0};  // 0 == automatic
+    std::atomic<std::size_t>         reserved_ {0};  // sum over the fits in flight
+    std::atomic<int>                 fits_     {0};
 
     /*  Mutable and atomic: the valve is an implementation detail of reading
      *  the budget, every reader is a const accessor, and the readers are the

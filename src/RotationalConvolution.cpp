@@ -165,10 +165,15 @@ private:
      *  a small one, and rebuilding one means a binary search and a sort per
      *  model pixel.                                                          */
     void trim_() {
-        const std::size_t budget =
-            MemoryBudget::instance().rotational_weights();
+        /*  Both limits are per fit in flight (MemoryBudget::Fit): fits
+         *  running side by side in one process share this cache, and a cap
+         *  sized for one of them has each evicting the tables the others
+         *  are about to reuse.                                             */
+        const MemoryBudget& mb    = MemoryBudget::instance();
+        const std::size_t   max_n = mb.entry_cap(MAX_CACHE_SIZE);
+        const std::size_t budget  = mb.rotational_weights();
         while (cache_map.size() > 1 && !lru_list.empty() &&
-               (cache_map.size() > MAX_CACHE_SIZE || cache_bytes > budget)) {
+               (cache_map.size() > max_n || cache_bytes > budget)) {
             const std::size_t before = cache_map.size();
             evict_lru();
             /*  GridCacheKey compares with a tolerance but hashes exactly, so

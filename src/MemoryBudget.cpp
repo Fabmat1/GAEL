@@ -27,7 +27,8 @@ constexpr std::size_t kFloor = 192 * kMiB;
  *  MemAvailable is an estimate rather than a promise.                       */
 constexpr double kFractionOfAvailable = 0.55;
 
-/*  An absolute ceiling.  Past a few GB these tables stop earning their keep:
+/*  An absolute ceiling, per fit in flight.  Past a few GB these tables stop
+ *  earning their keep for one fit:
  *  the entries a fit reuses are the handful it cycles through per iteration,
  *  and holding more only adds allocator and page-fault pressure (measured in
  *  main.cpp's --cache-mem note, where 512 MiB was already mildly worse than
@@ -202,17 +203,57 @@ MemoryBudget& MemoryBudget::instance()
     return inst;
 }
 
-void MemoryBudget::set_total(std::size_t bytes)    { explicit_ = bytes; }
-void MemoryBudget::set_reserved(std::size_t bytes) { reserved_ = bytes; }
-std::size_t MemoryBudget::reserved() const         { return reserved_; }
+void MemoryBudget::set_total(std::size_t bytes) { explicit_.store(bytes); }
+std::size_t MemoryBudget::reserved() const      { return reserved_.load(); }
 
-std::size_t MemoryBudget::auto_total_() const
+/* ---- fits in flight (see the header) -------------------------------- */
+MemoryBudget::Fit::Fit()  { instance().fits_.fetch_add(1); }
+MemoryBudget::Fit::~Fit()
 {
-    if (detected_ == 0) return 1024 * kMiB;      // could not tell: stay modest
+    MemoryBudget& b = instance();
+    b.reserved_.fetch_sub(reserved_);
+    b.fits_.fetch_sub(1);
+}
+void MemoryBudget::Fit::reserve(std::size_t bytes)
+{
+    MemoryBudget& b = instance();
+    b.reserved_.fetch_add(bytes);
+    b.reserved_.fetch_sub(reserved_);
+    reserved_ = bytes;
+}
+
+int MemoryBudget::fits() const { return std::max(1, fits_.load()); }
+
+std::size_t MemoryBudget::entry_cap(std::size_t per_fit) const
+{
+    return per_fit * static_cast<std::size_t>(fits());
+}
+
+/*  The share of what is free, between one fit's floor and one ceiling per
+ *  fit.  For one fit that is the old clamp(share, floor, ceiling) exactly.
+ *  For N it is what N gael-worker processes would each have taken, except
+ *  that the share of free memory is the machine's and not one per fit:
+ *  separate processes would each have read the same MemAvailable and
+ *  promised themselves 55 % of it, which only the pressure valve kept off
+ *  the swap.                                                               */
+std::size_t MemoryBudget::auto_total(std::size_t available, int fits)
+{
+    if (available == 0) return 1024 * kMiB;      // could not tell: stay modest
     const auto share =
-        static_cast<std::size_t>(static_cast<double>(detected_) *
+        static_cast<std::size_t>(static_cast<double>(available) *
                                  kFractionOfAvailable);
-    return std::clamp(share, kFloor, kCeiling);
+    const auto n = static_cast<std::size_t>(std::max(1, fits));
+    return std::clamp(share, kFloor, n * kCeiling);
+}
+
+/*  kFloor is one fit's surface plus the weights that made it, so N fits want
+ *  N of them -- but never more than the gross budget, which is where the
+ *  machine (or whoever set it explicitly) draws the line.  For one fit this
+ *  is kFloor.                                                              */
+std::size_t MemoryBudget::floor_(std::size_t gross) const
+{
+    const auto n = static_cast<std::size_t>(fits());
+    return std::max(kFloor, std::min(n * kFloor, gross));
 }
 
 /* ---- pressure valve (see the header) -------------------------------- *
@@ -278,16 +319,18 @@ std::size_t MemoryBudget::total() const
 {
     refresh_pressure_();
 
-    const std::size_t gross = explicit_ ? explicit_ : auto_total_();
+    const std::size_t set   = explicit_.load();
+    const std::size_t gross = set ? set : auto_total(detected_, fits());
+    const std::size_t floor = floor_(gross);
     /*  The solver's own arrays come off the top: they are allocated whatever
      *  the caches do, so a budget that ignored them would be describing a
      *  machine with more memory than this one has.                          */
-    const std::size_t net =
-        (gross > reserved_ + kFloor) ? gross - reserved_ : kFloor;
+    const std::size_t res = reserved_.load();
+    const std::size_t net = (gross > res + floor) ? gross - res : floor;
 
     const auto scaled = static_cast<std::size_t>(
         static_cast<double>(net) * scale_.load(std::memory_order_relaxed));
-    return std::max(kFloor, scaled);
+    return std::max(floor, scaled);
 }
 
 /*  Shares.  Model surfaces are the largest because a joint fit keeps one live
@@ -303,9 +346,11 @@ std::string MemoryBudget::describe() const
     auto mib = [](std::size_t b) { return std::to_string(b / kMiB) + " MiB"; };
     std::ostringstream os;
     os << "[memory] budget " << mib(total())
-       << (explicit_ ? " (set)" : " (auto)");
+       << (explicit_.load() ? " (set)" : " (auto)");
+    if (const int n = fits(); n > 1) os << " for " << n << " fits in flight";
     if (detected_) os << ", " << mib(detected_) << " available";
-    if (reserved_) os << ", " << mib(reserved_) << " reserved by the solver";
+    if (const std::size_t r = reserved())
+        os << ", " << mib(r) << " reserved by the solver";
     if (const double sc = pressure_scale(); sc < 0.999)
         os << ", scaled to " << static_cast<int>(sc * 100.0)
            << "% by memory pressure";

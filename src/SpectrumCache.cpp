@@ -113,17 +113,20 @@ void SpectrumCache::evict_if_needed_()
     /*  Always keep at least one entry, whatever the budget says: evicting the
      *  spectrum a caller is about to use would turn the cache into a slow
      *  no-op rather than a small one.                                       */
-    /*  The tighter of what this cache was told to hold and what the process
-     *  can currently afford.  Re-read on every eviction pass rather than
-     *  stored, because the second of the two moves: MemoryBudget scales the
-     *  shares down when the machine runs short, and a cache that had cached
-     *  its own limit would go on holding memory through exactly the episode
-     *  the scaling exists for.                                             */
+    /*  The tighter of what this cache was told to hold -- per fit, once for
+     *  every fit in flight, since each of them keeps its own surfaces live --
+     *  and what the process can currently afford.  Re-read on every eviction
+     *  pass rather than stored, because both move: fits start and finish,
+     *  and MemoryBudget scales the shares down when the machine runs short,
+     *  and a cache that had cached its own limit would go on holding memory
+     *  through exactly the episode the scaling exists for.                 */
+    const MemoryBudget& budget = MemoryBudget::instance();
+    const std::size_t   limit  = std::min(budget.entry_cap(max_bytes_),
+                                          budget.model_spectra());
     auto over_budget = [&] {
         if (cache_.size() <= 1) return false;
         if (max_entries_ && cache_.size() > max_entries_) return true;
-        return bytes_ > std::min(max_bytes_,
-                                 MemoryBudget::instance().model_spectra());
+        return bytes_ > limit;
     };
 
     while (over_budget()) {

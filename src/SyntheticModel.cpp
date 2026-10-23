@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <utility>
@@ -237,11 +238,13 @@ Vector make_conv_grid(double lam_lo, double lam_hi,
 }
 
 /*  Memoised: the grid depends only on the union range and the spectrograph,
- *  both fixed for the whole fit.                                            */
+ *  both fixed for the whole fit.  A deque, because callers keep the returned
+ *  reference while other threads -- other arms, other fits in the same
+ *  process -- append, and a vector would move every entry when it grew.    */
 const Vector& conv_grid(const Vector& lam_u, double resOffset, double resSlope)
 {
     struct Entry { double lo, hi, ro, rs; Vector g; };
-    static std::vector<Entry> cache;
+    static std::deque<Entry>  cache;
     static std::mutex         mtx;
 
     const double lo = lam_u[0];

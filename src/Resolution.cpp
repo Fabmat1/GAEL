@@ -172,9 +172,15 @@ static WeightsPtr insert_cache_entry(const CacheKey& key,
     g_lruList.push_front(key);
     g_cacheBytes += nbytes;
 
+    /*  Both limits are per fit in flight (MemoryBudget::Fit): each fit
+     *  cycles through its own (grid, spectrograph) pairs, and a host running
+     *  fits side by side would otherwise have every one of them evicting the
+     *  others' weights and rebuilding its own an exp() at a time.          */
+    const MemoryBudget& budget  = MemoryBudget::instance();
+    const std::size_t   max_n   = budget.entry_cap(MAX_CACHE_SIZE);
+    const std::size_t   max_b   = budget.resolution_weights();
     while (g_weightCache.size() > 1 &&
-           (g_weightCache.size() > MAX_CACHE_SIZE ||
-            g_cacheBytes > MemoryBudget::instance().resolution_weights())) {
+           (g_weightCache.size() > max_n || g_cacheBytes > max_b)) {
         const CacheKey victim = g_lruList.back();
         if (auto it = g_weightCache.find(victim); it != g_weightCache.end()) {
             g_cacheBytes -= std::min(g_cacheBytes, it->second.second);

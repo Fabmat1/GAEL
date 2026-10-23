@@ -57,17 +57,20 @@ public:
      *  in which only the memory budget below decides when to evict.       */
     void set_capacity(std::size_t n);
 
-    /*  Cap on the bytes held by the cached spectra.  Entries differ in size
-     *  by more than an order of magnitude -- a sliced model surface spectrum
-     *  is ~10 000 points, a final synthetic one only as long as the observed
-     *  grid -- so a fixed entry count is either wasteful or far too small
-     *  depending on the fit.  Budgeting bytes makes one default correct for
-     *  both.                                                               */
+    /*  Cap on the bytes held by the cached spectra, per fit in flight
+     *  (MemoryBudget::Fit): the cache holds bytes * fits(), capped by its
+     *  share of the process budget.  Entries differ in size by more than an
+     *  order of magnitude -- a sliced model surface spectrum is ~10 000
+     *  points, a final synthetic one only as long as the observed grid -- so
+     *  a fixed entry count is either wasteful or far too small depending on
+     *  the fit.  Budgeting bytes makes one default correct for both.       */
     void set_memory_budget(std::size_t bytes);
 
-    /*  Raise the budget to `bytes` if it is currently lower, leaving a larger
-     *  one (a --cache-mem on the command line) alone.  The caller that knows
-     *  how many working sets will be live at once is the fit, not the CLI:
+    /*  Raise the per-fit budget to `bytes` if it is currently lower, leaving
+     *  a larger one (a --cache-mem on the command line) alone.  It only ever
+     *  rises -- a fit that wants less than an earlier one still gets as much,
+     *  which the process share bounds anyway.  The caller that knows how
+     *  many working sets will be live at once is the fit, not the CLI:
      *  evaluating the Jacobian's columns in parallel puts one model surface
      *  plus one synthetic spectrum per fitted arm in flight *per thread*, and
      *  a budget sized for a single one of those turns the cache into a
@@ -109,7 +112,7 @@ private:
     mutable std::condition_variable_any       inflight_cv_;
     std::size_t     bytes_       = 0;
     std::size_t     max_entries_ = 0;              // 0 == no entry cap
-    std::size_t     max_bytes_   = 128ull << 20;   // see --cache-mem in main.cpp
+    std::size_t     max_bytes_   = 128ull << 20;   // per fit; see --cache-mem in main.cpp
 };
 
 /* ===================================================================== *
