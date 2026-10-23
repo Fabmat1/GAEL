@@ -3,6 +3,7 @@
 #include "specfit/JsonUtils.hpp"
 #include "specfit/SpectrumCache.hpp"
 #include "specfit/MemoryBudget.hpp"
+#include "specfit/Platform.hpp"
 #include "specfit/SyntheticModel.hpp"
 #include "specfit/UnifiedFitWorkflow.hpp"
 #include <algorithm>
@@ -22,7 +23,11 @@
 #include <thread>
 #include <utility>
 
+#if defined(_WIN32)
+#include <process.h>        // _getpid
+#else
 #include <unistd.h>
+#endif
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
 #endif
@@ -170,6 +175,15 @@ void measure_process(specfit::api::FitResult::Resources& res)
 }
 extern "C" void gael_on_sigterm(int) { g_terminate.store(true); }
 
+int process_id()
+{
+#if defined(_WIN32)
+    return ::_getpid();
+#else
+    return static_cast<int>(::getpid());
+#endif
+}
+
 /*  Machine-readable heartbeat for out-of-process monitoring: a small JSON
  *  file rewritten atomically (tmp + rename), at most once a second while the
  *  fit runs and once more with the final state.  Timestamps are this
@@ -202,7 +216,7 @@ private:
                double eta_s, int exit_code)
     {
         nlohmann::json j;
-        j["pid"]          = static_cast<int>(::getpid());
+        j["pid"]          = process_id();
         j["state"]        = state;
         j["stage"]        = stage;
         j["detail"]       = detail;
@@ -232,12 +246,9 @@ std::string find_global_settings() {
         "../global_settings.json",
         "../../global_settings.json",
     };
-    try {
-        auto exe = fs::canonical("/proc/self/exe").parent_path();
+    if (const auto exe = specfit::executable_path(); !exe.empty())
         candidates.insert(candidates.begin(),
-                          (exe / "global_settings.json").string());
-    } catch (...) {
-    }
+                          (exe.parent_path() / "global_settings.json").string());
     for (const auto &p : candidates)
         if (fs::exists(p)) {
             std::cout << "Loaded config from: " << p << '\n';

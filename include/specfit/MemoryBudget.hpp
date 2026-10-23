@@ -116,10 +116,10 @@ public:
     std::size_t resolution_weights() const;   // Resolution
 
     /*  Physical memory this process may still take: the smaller of
-     *  MemAvailable and what its tightest memory cgroup has left, in bytes.
-     *  Swap deliberately does not count -- a fit that swaps has already cost
-     *  more than rebuilding every table it holds.  0 when nothing could be
-     *  determined.                                                          */
+     *  MemAvailable (or the macOS / Windows equivalent) and what its
+     *  tightest memory cgroup has left, in bytes.  Swap deliberately does
+     *  not count -- a fit that swaps has already cost more than rebuilding
+     *  every table it holds.  0 when nothing could be determined.          */
     static std::size_t available_ram();
 
     /*  The tightest memory cgroup over this process (v1 or v2): its limit,

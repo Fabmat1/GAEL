@@ -13,6 +13,7 @@ Pronounce as : /ɡeɪl/
    * [Ubuntu / Debian](#1-ubuntu)  
    * [Arch Linux](#2-arch-linux)  
    * [macOS](#3-macos)  
+   * [Windows](#3b-windows)  
 4. [Building GAEL](#4-build-gael)  
 5. [Running GAEL](#running-gael)  
 6. [Troubleshooting](#troubleshooting)  
@@ -51,7 +52,7 @@ sudo apt update && sudo apt upgrade
 
 # Build & runtime dependencies
 sudo apt install \
-    build-essential gfortran cmake git \
+    build-essential cmake git \
     libopenblas-dev \
     libboost-dev libboost-filesystem-dev libboost-system-dev \
     libcfitsio-dev libccfits-dev \
@@ -88,7 +89,7 @@ sudo make install
 ```
 sudo pacman -Syu
 sudo pacman -S \
-     base-devel git cmake gcc-fortran \
+     base-devel git cmake \
      openblas \
      boost \
      eigen \
@@ -112,17 +113,40 @@ yay -S unordered_dense-git
 ---
 
 ### 3. macOS
+Apple Silicon and Intel, with Apple's own compiler (Xcode command-line tools)
+and Homebrew:
 ```
 xcode-select --install      # first time only
-brew install cmake git llvm eigen boost openblas cfitsio tbb nlohmann-json cxxopts
+brew install cmake git eigen boost openblas libomp cfitsio ccfits tbb \
+             nlohmann-json cxxopts unordered_dense
 
-# Use Homebrew LLVM (recommended)
-export CC=/opt/homebrew/opt/llvm/bin/clang
-export CXX=/opt/homebrew/opt/llvm/bin/clang++
-
-# If CMake cannot locate Homebrew packages:
-# cmake .. -DCMAKE_PREFIX_PATH="$(brew --prefix)"
+# Only for the PDF/plot reports (otherwise configure with -DGAEL_BUILD_REPORT=OFF):
+brew install python numpy
 ```
+`openblas` and `libomp` are keg-only in Homebrew; GAEL's CMake looks in their
+Homebrew prefixes itself, so no extra flags are needed. CUDA does not exist on
+macOS, and the build notices that on its own.
+
+---
+
+### 3b. Windows
+Two ways, in order of how little effort they take:
+
+* **WSL2** (recommended). Install Ubuntu from the Microsoft Store, then follow
+  the [Ubuntu](#1-ubuntu) instructions inside it. GAEL runs there exactly as on
+  Linux, at native speed.
+* **Native, MSYS2 UCRT64** (what ASTRA's Windows build uses). In the
+  "MSYS2 UCRT64" shell:
+  ```
+  pacman -S --needed mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,eigen3,openblas,boost,tbb,cfitsio,nlohmann-json,cxxopts,unordered_dense}
+  ```
+  MSYS2 has no CCfits package; build it once from
+  <https://heasarc.gsfc.nasa.gov/fitsio/CCfits/> with
+  `cmake -G Ninja -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5`
+  and pass its install prefix to GAEL as `-DCMAKE_PREFIX_PATH=<prefix>`.
+  Configure GAEL with `-G Ninja -DGAEL_BUILD_REPORT=OFF`.
+
+  Visual Studio (MSVC) is not supported.
 
 ---
 
@@ -135,9 +159,10 @@ mkdir build && cd build
 #   GPU on  (default): -DGAEL_ENABLE_CUDA=ON
 #   GPU off           : -DGAEL_ENABLE_CUDA=OFF
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
+cmake --build . -j 8      # works on every platform (macOS has no `nproc`)
+ctest -L unit             # quick self-check, a few seconds
 
-sudo make install         # optional, installs lib + CLI
+sudo cmake --install .    # optional, installs lib + CLI
 ```
 
 ---
@@ -209,7 +234,8 @@ Two optional `settings` keys mirror ISIS's `auto_freeze_sur_ratio`, which is
 | Message                                                       | Solution                                                                                               |
 |---------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
 | `Could NOT find Eigen3 (found version … 3.3.x)`               | Install/upgrade to Eigen ≥ 3.4 (see instructions above).                                                |
-| `Could NOT find unordered_dense`                              | Ensure the header resides in a CMake search path, e.g. `/usr/local/include/ankerl/unordered_dense`.     |
+| `Could NOT find unordered_dense`                              | Ensure the header resides in a CMake search path, e.g. `/usr/local/include/ankerl/unordered_dense.h`.   |
+| `OpenMP for C++ not found` (macOS)                            | `brew install libomp`. Apple's compiler has no OpenMP runtime of its own.                              |
 | `CUDA toolkit not found`                                      | Install CUDA **or** rebuild with `-DGAEL_ENABLE_CUDA=OFF`.                                           |
 
 ---

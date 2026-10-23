@@ -8,6 +8,19 @@
 #include <sstream>
 #include <string>
 
+#if defined(__APPLE__)
+#  include <mach/mach.h>
+#  include <sys/sysctl.h>
+#elif defined(_WIN32)
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
+
 namespace specfit {
 
 namespace {
@@ -49,9 +62,52 @@ std::size_t read_first_number(const std::string& path)
 
 /*  MemAvailable, in bytes.  It is the kernel's own estimate of what can be
  *  handed out without swapping, which is exactly the question here -- MemFree
- *  would ignore the reclaimable page cache and make every desktop look full. */
+ *  would ignore the reclaimable page cache and make every desktop look full.
+ *
+ *  macOS and Windows have no /proc, and without this the budget fell back to
+ *  a fixed 1 GiB there and the pressure valve never saw anything to react to.
+ *  Each gets its own closest equivalent; 0 still means "could not tell".    */
 std::size_t mem_available()
 {
+#if defined(__APPLE__)
+    /*  Installed memory minus what Activity Monitor calls "Memory Used": app
+     *  memory (anonymous pages that are not purgeable), wired pages and the
+     *  compressor's.  What is left is free pages plus the file cache, the
+     *  same reclaimable-counts-as-free reading as MemAvailable.  free_count
+     *  alone is the MemFree mistake: macOS keeps it near zero on purpose.
+     *  The host port is taken once -- every mach_host_self() call adds a
+     *  reference, and this runs four times a second.                        */
+    std::uint64_t total = 0;
+    std::size_t   len   = sizeof(total);
+    if (::sysctlbyname("hw.memsize", &total, &len, nullptr, 0) != 0 || total == 0)
+        return 0;
+
+    static const mach_port_t host = ::mach_host_self();
+    vm_size_t page = 0;
+    if (::host_page_size(host, &page) != KERN_SUCCESS || page == 0) return 0;
+    vm_statistics64_data_t vm{};
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (::host_statistics64(host, HOST_VM_INFO64,
+                            reinterpret_cast<host_info64_t>(&vm), &count) !=
+        KERN_SUCCESS)
+        return 0;
+
+    const std::uint64_t app =
+        vm.internal_page_count > vm.purgeable_count
+            ? std::uint64_t(vm.internal_page_count) - vm.purgeable_count
+            : 0;
+    const std::uint64_t used =
+        (app + vm.wire_count + vm.compressor_page_count) *
+        static_cast<std::uint64_t>(page);
+    return used < total ? static_cast<std::size_t>(total - used) : 0;
+#elif defined(_WIN32)
+    /*  ullAvailPhys counts the standby list (Windows' file cache), so it is
+     *  already the reclaimable-counts-as-free figure.                       */
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    if (!::GlobalMemoryStatusEx(&ms)) return 0;
+    return static_cast<std::size_t>(ms.ullAvailPhys);
+#else
     std::ifstream f("/proc/meminfo");
     if (!f) return 0;
     std::string line;
@@ -63,6 +119,7 @@ std::size_t mem_available()
         return 0;
     }
     return 0;
+#endif
 }
 
 /*  Value of `key` in a memory.stat file (one "key value" pair per line). */
@@ -279,7 +336,8 @@ void MemoryBudget::refresh_pressure_() const
         duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
             .count());
 
-    /*  At most four times a second: this reads /proc/meminfo and is called
+    /*  At most four times a second: this reads /proc/meminfo (or asks the
+     *  macOS / Windows kernel the same question) and is called
      *  from inside the caches' critical sections.                          */
     auto last = last_sample_ms_.load(std::memory_order_relaxed);
     if (now_ms - last < 250) return;

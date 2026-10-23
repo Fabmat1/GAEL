@@ -185,7 +185,11 @@ int main()
 {
     //  The fits-in-flight checks need the automatic budget, which an
     //  override in the environment would replace.
+#ifdef _WIN32
+    ::_putenv_s("GAEL_MEM_BUDGET", "");
+#else
     ::unsetenv("GAEL_MEM_BUDGET");
+#endif
     check_fit_scaling();
 
     const fs::path root =

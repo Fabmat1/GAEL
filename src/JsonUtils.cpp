@@ -21,6 +21,13 @@ static std::string expand(const std::string& input)
     while (std::regex_search(out, m, re)) {
         std::string var = m[1];
         const char* env = std::getenv(var.c_str());
+#ifdef _WIN32
+        /*  The shipped basePaths name ${HOME} and ${USER}, which Windows
+         *  spells differently; without this they expanded to nothing and a
+         *  grid in the user's home folder was never found.                 */
+        if (!env && var == "HOME") env = std::getenv("USERPROFILE");
+        if (!env && var == "USER") env = std::getenv("USERNAME");
+#endif
         out.replace(m.position(0), m.length(0), env ? env : "");
     }
     return out;

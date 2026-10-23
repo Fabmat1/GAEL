@@ -1,5 +1,6 @@
 #include "specfit/ReportUtils.hpp"
 #include "specfit/ContinuumUtils.hpp"
+#include "specfit/Platform.hpp"
 #include "matplotlibcpp.h"               // <-- header-only Python wrapper
 #include <filesystem>
 #include <fstream>
@@ -152,20 +153,10 @@ std::string python_helper_path()
 #endif
 
     /* same directory as executable ---------------------------------- */
-#ifndef _WIN32
-    char exe[4096]{};
-    ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe)-1);
-    if (n>0) {
-        fs::path p = fs::path(exe).parent_path() / "GAEL_multiplot.py";
+    if (const auto exe = specfit::executable_path(); !exe.empty()) {
+        fs::path p = exe.parent_path() / "GAEL_multiplot.py";
         if (fs::exists(p)) return p.string();
     }
-#else
-    char exe[MAX_PATH];
-    if (::GetModuleFileNameA(NULL, exe, MAX_PATH)) {
-        fs::path p = fs::path(exe).parent_path() / "GAEL_multiplot.py";
-        if (fs::exists(p)) return p.string();
-    }
-#endif
 
     /* last resort: rely on PATH ------------------------------------- */
     return "GAEL_multiplot.py";

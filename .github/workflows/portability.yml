@@ -1,0 +1,100 @@
+# Builds GAEL on macOS and Windows and runs the unit tests there.
+#
+# Development happens on Linux, so these two are the platforms where a change
+# can break without anyone noticing until a user tries it.  Both jobs follow
+# the README's install instructions as literally as possible, so a red run
+# here means the README is wrong for that platform too.
+name: macOS and Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    # Apple Silicon, Apple's own clang -- what most Mac users will have.
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies (Homebrew)
+        run: |
+          brew install eigen boost openblas libomp cfitsio ccfits tbb \
+                       nlohmann-json cxxopts unordered_dense
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGAEL_BUILD_REPORT=OFF
+
+      - name: Build
+        run: cmake --build build -j 4
+
+      - name: Unit tests
+        run: ctest --test-dir build -L unit --output-on-failure
+
+      - name: CLI starts
+        run: build/GAEL --version
+
+  windows:
+    # MSYS2 UCRT64 (mingw-w64 GCC), the toolchain ASTRA's Windows build uses.
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-eigen3
+            mingw-w64-ucrt-x86_64-openblas
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-tbb
+            mingw-w64-ucrt-x86_64-cfitsio
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-cxxopts
+            mingw-w64-ucrt-x86_64-unordered_dense
+            mingw-w64-ucrt-x86_64-python
+            curl
+
+      # MSYS2 has no CCfits package.  Static, because CCfits' CMakeLists only
+      # exports symbols for MSVC shared builds; the policy floor because it
+      # declares cmake_minimum_required(3.8), which CMake 4 refuses.
+      - name: CCfits (from source)
+        run: |
+          curl -fsSL -o ccfits.tgz \
+            https://heasarc.gsfc.nasa.gov/FTP/software/fitsio/ccfits/CCfits.tar.gz
+          mkdir ccfits-src && tar xzf ccfits.tgz -C ccfits-src
+          SD="$(find ccfits-src -maxdepth 2 -name CMakeLists.txt -printf '%h\n' -quit)"
+          cmake -S "$SD" -B ccfits-build -G Ninja \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DCMAKE_CXX_STANDARD=20 \
+            -DCMAKE_INSTALL_PREFIX="$PWD/ccfits"
+          cmake --build ccfits-build
+          cmake --install ccfits-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DGAEL_BUILD_REPORT=OFF -DGAEL_ENABLE_CUDA=OFF \
+            -DCMAKE_PREFIX_PATH="$(cygpath -m "$PWD/ccfits")"
+
+      # -k 0: a Windows break is usually several related errors at once, and
+      # one run that reports all of them beats one run per error.
+      - name: Build
+        run: cmake --build build -j 4 -- -k 0
+
+      - name: Unit tests
+        run: ctest --test-dir build -L unit --output-on-failure
+
+      - name: CLI starts
+        run: build/GAEL.exe --version

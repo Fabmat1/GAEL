@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.18)
 cmake_policy(SET CMP0074 NEW)       # honour *_ROOT / CMAKE_PREFIX_PATH
 
-project(GAEL LANGUAGES C CXX Fortran)
+# No Fortran: nothing here is Fortran, and declaring it made a gfortran a
+# configure-time requirement on every platform -- on macOS and Windows that was
+# a whole extra toolchain installed only to satisfy this line.
+project(GAEL LANGUAGES C CXX)
 
 if(POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
@@ -10,10 +13,21 @@ endif()
 # ---------------------------------------------------------------------------
 # 0. Tell CMake where Home-brew lives (needed only on macOS)
 # ---------------------------------------------------------------------------
+#  openblas and libomp are keg-only: Homebrew does not link them into its
+#  prefix, so CMake finds them only if their own prefixes are named.
+set(_gael_libomp "")
 if(APPLE)
     foreach(_p "/opt/homebrew" "/usr/local")
         if(EXISTS "${_p}")
             list(APPEND CMAKE_PREFIX_PATH "${_p}")
+            foreach(_keg openblas libomp)
+                if(EXISTS "${_p}/opt/${_keg}")
+                    list(APPEND CMAKE_PREFIX_PATH "${_p}/opt/${_keg}")
+                endif()
+            endforeach()
+            if(NOT _gael_libomp AND EXISTS "${_p}/opt/libomp/include/omp.h")
+                set(_gael_libomp "${_p}/opt/libomp")
+            endif()
         endif()
     endforeach()
 endif()
@@ -48,15 +62,26 @@ endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(PROJECT_IS_TOP_LEVEL)
+    #  Tune for the machine doing the build.  Apple's clang on arm64 rejects
+    #  -march=native outright and wants -mcpu=native, so ask the compiler
+    #  rather than assume.
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag(-march=native GAEL_HAVE_MARCH_NATIVE)
+    if(GAEL_HAVE_MARCH_NATIVE)
+        add_compile_options(-march=native)
+    else()
+        check_cxx_compiler_flag(-mcpu=native GAEL_HAVE_MCPU_NATIVE)
+        if(GAEL_HAVE_MCPU_NATIVE)
+            add_compile_options(-mcpu=native)
+        endif()
+    endif()
     add_compile_options(
-        -march=native
         -funroll-loops
         -ftree-vectorize
     )
 endif()
 add_compile_options(
     -Wno-deprecated-declarations
-    -Wno-dev
 )
 
 # ---------------------------------------------------------------------------
@@ -124,13 +149,75 @@ find_package(CUDAToolkit QUIET)
 # ---------------------------------------------------------------------------
 # 4. Dependencies
 # ---------------------------------------------------------------------------
+# The PDF/plot reporting helpers are the only part that needs Python's
+# development files and NumPy.  Declared here, ahead of the dependency search,
+# so a build without them does not have to have those installed.
+option(GAEL_BUILD_REPORT "Build the PDF/plot reporting helpers" ON)
+
+# Apple's clang compiles OpenMP but ships neither the runtime nor the driver
+# flag, and CMake's FindOpenMP does not know where Homebrew's libomp lives.
+# Values passed on the command line (ASTRA's build-macos.sh does) win.
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND _gael_libomp
+   AND NOT DEFINED OpenMP_CXX_FLAGS)
+    foreach(_lang C CXX)
+        set(OpenMP_${_lang}_FLAGS "-Xpreprocessor -fopenmp -I${_gael_libomp}/include")
+        set(OpenMP_${_lang}_LIB_NAMES omp)
+    endforeach()
+    set(OpenMP_omp_LIBRARY "${_gael_libomp}/lib/libomp.dylib")
+endif()
+
 find_package(Eigen3        REQUIRED)
-find_package(OpenMP        COMPONENTS C CXX Fortran)   # “REQUIRED” later
-find_package(OpenBLAS      REQUIRED)
+# C too, because some OpenBLAS packages' targets link OpenMP::OpenMP_C.  C++
+# is required: GaelAPI.cpp includes <omp.h> unconditionally, and failing here
+# names the missing piece where failing at that #include did not.
+find_package(OpenMP        COMPONENTS C CXX)
+if(NOT OpenMP_CXX_FOUND)
+    message(FATAL_ERROR
+        "OpenMP for C++ not found. On macOS: brew install libomp (Apple's "
+        "clang has no OpenMP runtime of its own).")
+endif()
 find_package(Boost         REQUIRED CONFIG COMPONENTS filesystem)
 find_package(nlohmann_json REQUIRED)
-find_package(Python3       REQUIRED COMPONENTS Interpreter Development NumPy)
 find_package(TBB           REQUIRED)
+if(GAEL_BUILD_REPORT)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development NumPy)
+else()
+    find_package(Python3 COMPONENTS Interpreter)   # the ctest drivers only
+endif()
+
+# ---- 4a. OpenBLAS ---------------------------------------------------------
+# Linux distributions ship an OpenBLASConfig.cmake that defines the
+# OpenBLAS::OpenBLAS target; Homebrew's and some source builds define only
+# variables, or nothing usable.  Make the target from the library and header
+# when the package did not.  libopenblas bundles LAPACK and LAPACKE.
+#
+# Some packages (Arch's, for one) also put OpenMP::OpenMP_Fortran in the
+# target's link interface, which is the reason GAEL used to declare Fortran.
+# libopenblas already carries its own dependency on the OpenMP runtime, and
+# GAEL compiles no Fortran, so an empty stand-in satisfies it without a
+# Fortran compiler.  Directory-scoped, so a parent project that does find
+# OpenMP for Fortran is unaffected.
+if(NOT TARGET OpenMP::OpenMP_Fortran)
+    add_library(OpenMP::OpenMP_Fortran INTERFACE IMPORTED)
+endif()
+find_package(OpenBLAS QUIET)
+if(NOT TARGET OpenBLAS::OpenBLAS)
+    find_library(GAEL_OPENBLAS_LIBRARY NAMES openblas)
+    find_path(GAEL_OPENBLAS_INCLUDE_DIR NAMES cblas.h
+              PATH_SUFFIXES openblas
+              HINTS ${OpenBLAS_INCLUDE_DIRS})
+    if(NOT GAEL_OPENBLAS_LIBRARY OR NOT GAEL_OPENBLAS_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "OpenBLAS not found. Install it (apt: libopenblas-dev, "
+            "brew: openblas, MSYS2: mingw-w64-ucrt-x86_64-openblas) or pass "
+            "-DCMAKE_PREFIX_PATH=<its prefix>.")
+    endif()
+    add_library(OpenBLAS::OpenBLAS UNKNOWN IMPORTED)
+    set_target_properties(OpenBLAS::OpenBLAS PROPERTIES
+        IMPORTED_LOCATION             "${GAEL_OPENBLAS_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${GAEL_OPENBLAS_INCLUDE_DIR}")
+    message(STATUS "GAEL: OpenBLAS from ${GAEL_OPENBLAS_LIBRARY}")
+endif()
 
 # ---- 4a. Header-only libraries that may lack a CMake package --------------
 find_package(cxxopts QUIET CONFIG)
@@ -145,7 +232,9 @@ endif()
 find_package(unordered_dense QUIET CONFIG)
 if(NOT unordered_dense_FOUND)
     message(STATUS "unordered_denseConfig.cmake not found – creating IMPORTED target")
-    find_path(UNORD_DENSE_INCLUDE_DIR unordered_dense.h REQUIRED)
+    # The sources include <ankerl/unordered_dense.h>, so that is what has to
+    # be found -- the directory above ankerl/, not the one holding the file.
+    find_path(UNORD_DENSE_INCLUDE_DIR ankerl/unordered_dense.h REQUIRED)
     add_library(unordered_dense::unordered_dense INTERFACE IMPORTED)
     set_target_properties(unordered_dense::unordered_dense
         PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${UNORD_DENSE_INCLUDE_DIR}")
@@ -153,6 +242,10 @@ endif()
 
 find_library(CCFITS_LIB  CCfits   REQUIRED)
 find_library(CFITSIO_LIB cfitsio  REQUIRED)
+# The headers too: they sit on the default include path on Linux and under the
+# Homebrew prefix on macOS, but a CCfits built from source into its own prefix
+# (MSYS2 has no package) was found as a library and then failed to compile.
+find_path(CCFITS_INCLUDE_DIR CCfits/CCfits)
 
 # ---------------------------------------------------------------------------
 # 5. Core library (no Python, no matplotlib) – this is what ASTRA links
@@ -183,6 +276,7 @@ add_library(GAELcore
     src/GaelAPI_json.cpp       # JSON adapters (separate TU)
     src/GaelAPI_result_json.cpp # FitResult <-> JSON for out-of-process fits
     src/GridDataProvider.cpp   # pluggable remote grid file source
+    src/Platform.cpp           # executable path, per OS
 )
 add_library(GAEL::core ALIAS GAELcore)
 
@@ -191,6 +285,9 @@ target_include_directories(GAELcore
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE extern)
+if(CCFITS_INCLUDE_DIR)
+    target_include_directories(GAELcore PRIVATE ${CCFITS_INCLUDE_DIR})
+endif()
 
 target_compile_definitions(GAELcore PUBLIC
     EIGEN_USE_BLAS EIGEN_USE_LAPACKE)
@@ -203,11 +300,8 @@ target_link_libraries(GAELcore PUBLIC
     nlohmann_json::nlohmann_json
     Boost::boost Boost::filesystem
     TBB::tbb
-    unordered_dense::unordered_dense)
-
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(GAELcore PUBLIC OpenMP::OpenMP_CXX)
-endif()
+    unordered_dense::unordered_dense
+    OpenMP::OpenMP_CXX)
 
 # ---------------------------------------------------------------------------
 # 6. Optional CUDA attach to core
@@ -228,7 +322,6 @@ endif()
 # ---------------------------------------------------------------------------
 # 7. Report library (LaTeX + matplotlib-cpp). Optional – ASTRA doesn't need it.
 # ---------------------------------------------------------------------------
-option(GAEL_BUILD_REPORT "Build the PDF/plot reporting helpers" ON)
 if(GAEL_BUILD_REPORT)
     add_library(GAELreport src/ReportUtils.cpp)
     add_library(GAEL::report ALIAS GAELreport)

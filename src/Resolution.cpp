@@ -21,7 +21,10 @@ namespace specfit {
 using Vector = Eigen::VectorXd;
 
 namespace {
-constexpr double SIGMA_FROM_FWHM = 1.0 / (2.0 * std::sqrt(2.0 * std::log(2.0)));
+/*  1 / (2 sqrt(2 ln 2)), written out: std::sqrt and std::log are constexpr
+ *  only as a GCC extension, and clang (Apple's included) rejects them here.
+ *  This literal is the same double the expression evaluates to.          */
+constexpr double SIGMA_FROM_FWHM = 0.42466090014400953;
 constexpr double KERNEL_RADIUS   = 5.0;
 
 // Structure to hold precomputed weights for one output point
