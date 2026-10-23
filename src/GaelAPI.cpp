@@ -23,6 +23,7 @@
 #include <random>
 #include <sstream>
 #include <array>
+#include <atomic>
 #include <map>
 
 namespace specfit::api {
@@ -156,6 +157,11 @@ void GaelSession::set_log_callback(LogFn cb)                    { impl_->logger 
 
 // ---------------------------------------------------------------------------
 namespace {
+
+/*  Sessions running in this process right now.  The model-spectrum cache is
+ *  one per process, so a host that runs fits side by side (ASTRA's mass fits
+ *  do, one per star) has them all drawing on it at once.                    */
+std::atomic<int> g_sessions_in_flight{0};
 
 // ---------------------------------------------------------------------------
 //  ISIS seeds every continuum anchor with the same height,
@@ -417,6 +423,11 @@ FitResult GaelSession::run()
         ::specfit::set_grid_data_provider(impl_->gs.grid_provider);
         scope.installed = true;
     }
+
+    struct InFlight {
+        InFlight()  { g_sessions_in_flight.fetch_add(1); }
+        ~InFlight() { g_sessions_in_flight.fetch_sub(1); }
+    } in_flight;
 
     try {
         return run_impl();
@@ -707,8 +718,16 @@ FitResult GaelSession::run_impl()
         constexpr std::size_t kSurfaceBytes = 24ull << 20;   // ~1e6 pts x 3 x 8
         const std::size_t per_thread =
             kSurfaceBytes + obs_points * 3 * sizeof(double);
+        /*  Never less per fit than gael-worker's --cache-mem default, and once
+         *  per fit in flight: the cache starts at that default for the whole
+         *  process, so 24 synthe fits sharing it each kept ~5 MiB and spent
+         *  ~35x longer re-convolving the surfaces they had just evicted from
+         *  one another.  The process-wide budget still caps the sum.         */
+        constexpr std::size_t kPerFitFloor = 128ull << 20;
+        const std::size_t per_fit = std::max(
+            kPerFitFloor, static_cast<std::size_t>(std::max(1, nt)) * per_thread);
         ::specfit::SpectrumCache::instance().ensure_memory_budget(
-            static_cast<std::size_t>(std::max(1, nt)) * per_thread);
+            static_cast<std::size_t>(std::max(1, g_sessions_in_flight.load())) * per_fit);
     }
 
     ::specfit::UnifiedFitWorkflow wf(datasets, model, wcfg, frozen, nt);
