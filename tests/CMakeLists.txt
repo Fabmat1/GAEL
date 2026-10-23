@@ -51,6 +51,13 @@ target_link_libraries(test_grid_provider PRIVATE GAELcore)
 add_test(NAME grid_provider COMMAND test_grid_provider)
 set_tests_properties(grid_provider PROPERTIES TIMEOUT 120 LABELS "unit")
 
+# Fast, hermetic unit test: missing files inside a model grid are bridged,
+# unreadable ones still fail the fit.
+add_executable(test_grid_gaps test_grid_gaps.cpp)
+target_link_libraries(test_grid_gaps PRIVATE GAELcore)
+add_test(NAME grid_gaps COMMAND test_grid_gaps)
+set_tests_properties(grid_gaps PROPERTIES TIMEOUT 300 LABELS "unit")
+
 # Fast, hermetic unit test: cgroup v1/v2 limits and headroom for the budget.
 add_executable(test_memory_budget test_memory_budget.cpp)
 target_link_libraries(test_memory_budget PRIVATE GAELcore)

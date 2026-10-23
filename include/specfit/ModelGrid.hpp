@@ -4,6 +4,7 @@
 #include "ParameterSpec.hpp"
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -15,6 +16,17 @@ namespace specfit {
 struct GridAxis {
     std::string name;
     Vector      values;
+};
+
+/*  A model file that grid.fits promises but that does not exist, and how an
+ *  evaluation interpolated across it.  See "Holes in a grid" in
+ *  ModelGrid.cpp for the rule.                                             */
+struct GridGap {
+    std::string file;                                  // the missing file
+    std::vector<std::pair<std::string, double>> point; // its grid coordinates
+    std::string axis;    // the axis it was bridged along
+    double      from = 0.0;   // existing node below it on that axis
+    double      to   = 0.0;   // existing node above it
 };
 
 class ModelGrid {
@@ -29,7 +41,11 @@ public:
      *  surface flux (FITS column "c", broadened) instead of the normalised
      *  one, and `cont` carries the component's continuum, interp(c)/interp(f)
      *  over the hypercube corners.  Single-component fits leave it false and
-     *  get exactly what they always got.                                    */
+     *  get exactly what they always got.
+     *
+     *  A corner whose file does not exist is interpolated across instead of
+     *  failing the call (see gaps_used()); one that exists but cannot be
+     *  read still throws.                                                   */
     Spectrum load_spectrum(double teff,
                            double logg,
                            double z,
@@ -200,10 +216,36 @@ public:
      *  has to stay inside both.                                             */
     static ParameterBounds intersect(const std::vector<ParameterBounds>& b);
 
+    /*  Every missing file this grid object has interpolated across so far,
+     *  each once, in the order first used.  A fit builds its own ModelGrid,
+     *  so this is the list of gaps that fit's models depended on.          */
+    std::vector<GridGap> gaps_used() const;
+
+    /*  True once this process has met a missing file in any grid.  Lets the
+     *  model cache skip note_gaps() entirely on a grid without holes.      */
+    static bool any_gaps_known();
+
+    /*  Add the gaps the model at these parameters is built across to
+     *  gaps_used(), without building it.  For a caller that is about to take
+     *  the model from a cache another fit filled: load_spectrum() records
+     *  the gaps itself, but it is not called on a cache hit.  `species` are
+     *  the active elements, `abundances` indexed like species().           */
+    void note_gaps(double teff, double logg, double z, double he, double xi,
+                   const std::vector<int>&    species,
+                   const std::vector<double>& abundances) const;
+
 private:
     std::string              base_;
     std::vector<GridAxis>    axes_;
     std::vector<std::string> species_;
+
+    /*  Shared rather than held, for the same reason the lambda caches are
+     *  guarded by a file-local mutex: ModelGrid has to stay movable.       */
+    struct GapLog;
+    std::shared_ptr<GapLog>  gap_log_;
+    void record_gaps(const std::vector<GridGap>& used) const;
+
+    std::vector<const GridAxis*> element_cube_axes(int species_index) const;
 
     /*  Per-species wavelength grid, sliced to the active window; filled
      *  lazily because reading 25 of them costs more than most fits need.

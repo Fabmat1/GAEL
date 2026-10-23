@@ -299,6 +299,26 @@ struct SpectrumResult {
     SpectrumResult& operator=(SpectrumResult&&) noexcept;
 };
 
+/*  One missing model file a fit's models were interpolated across: the
+ *  missing node took the value linear interpolation along `axis` between
+ *  the existing nodes `from` and `to` gives it (see "Holes in a grid" in
+ *  ModelGrid.cpp).                                                          */
+struct GridGapResult {
+    int                           component = 0;   // index into `components`
+    std::string                   file;            // the missing file
+    std::map<std::string, double> point;           // its grid coordinates
+    std::string                   axis;            // axis bridged along
+    double                        from = 0.0;
+    double                        to   = 0.0;
+
+    GridGapResult();
+    ~GridGapResult();
+    GridGapResult(const GridGapResult&);
+    GridGapResult(GridGapResult&&) noexcept;
+    GridGapResult& operator=(const GridGapResult&);
+    GridGapResult& operator=(GridGapResult&&) noexcept;
+};
+
 struct FitResult {
     bool   converged   = false;
     int    iterations  = 0;
@@ -316,6 +336,13 @@ struct FitResult {
     // Their submission positions, in the same order as `rejected_files`, so a
     // caller can name the rejected spectra without matching on file names.
     std::vector<int>         rejected_indices;
+
+    /*  Model files missing from a grid that some model of this fit was
+     *  interpolated across, each once.  Empty for a grid without holes.  A
+     *  fit listed here is not wrong, but part of it rests on a model that was
+     *  linearly interpolated over twice the usual node spacing; each also
+     *  appears in `warnings` as one line of text.                          */
+    std::vector<GridGapResult> grid_gaps;
 
     // raw flat parameter vector + uncertainties (for advanced consumers)
     std::vector<double> raw_params;

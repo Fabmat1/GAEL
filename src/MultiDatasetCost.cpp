@@ -1,5 +1,6 @@
 #include "specfit/MultiDatasetCost.hpp"
 #include "specfit/ContinuumUtils.hpp"
+#include "specfit/ParallelErrors.hpp"
 #include "specfit/Types.hpp"
 #include <Eigen/Core>
 #include <cmath>
@@ -260,12 +261,15 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
      *  mutex-guarded (SpectrumCache, the convolution weight caches, the grids'
      *  lazily-read wavelength arrays), so the only per-thread state is the
      *  Vector each iteration writes to its own slot.                          */
+    ParallelErrors errors;
     #pragma omp parallel for schedule(dynamic, 1)
-    for (std::ptrdiff_t d = 0; d < static_cast<std::ptrdiff_t>(nds); ++d) {
-        all_cont [d] = continuum_of_dataset(parameters, d);
-        all_synth[d] = synth_of_dataset    (parameters, d);
-        all_tell [d] = telluric_of_dataset (parameters, d);
-    }
+    for (std::ptrdiff_t d = 0; d < static_cast<std::ptrdiff_t>(nds); ++d)
+        errors.run([&] {
+            all_cont [d] = continuum_of_dataset(parameters, d);
+            all_synth[d] = synth_of_dataset    (parameters, d);
+            all_tell [d] = telluric_of_dataset (parameters, d);
+        });
+    errors.rethrow();
 
     const double eps_base = 1e-6;
     Eigen::VectorXd r0 = Eigen::VectorXd::Zero(num_residuals_);
@@ -389,14 +393,15 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
 
         #pragma omp for schedule(dynamic, 1)
         for (std::ptrdiff_t t = 0;
-             t < static_cast<std::ptrdiff_t>(tell_tasks.size()); ++t) {
+             t < static_cast<std::ptrdiff_t>(tell_tasks.size()); ++t)
+          errors.run([&] {
             const std::size_t d = tell_tasks[t].d;
             const auto& ds = datasets_[d];
             const Eigen::Index o = row_offset_[d];
             const Eigen::Index n = row_count_ [d];
             const int j     = ds.telluric_param_offset + tell_tasks[t].k;
             const int j_col = column_of(j);
-            if (j_col < 0) continue;
+            if (j_col < 0) return;
 
             const double h = eps_base * (std::abs(parameters[j]) + 1.0);
             p_eps = parameters;
@@ -407,8 +412,9 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
 
             jacobians->col(j_col).segment(o, n) =
                 (r_eps.segment(o, n) - r0.segment(o, n)) / h;
-        }
+          });
     }
+    errors.rethrow();
 
     /* ========== (B) FD for stellar parameters ====================== *
      *  A tied parameter moves every spectrum, an untied one (vrad, by
@@ -441,10 +447,11 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
 
         #pragma omp for schedule(dynamic, 1)
         for (std::ptrdiff_t t = 0;
-             t < static_cast<std::ptrdiff_t>(stellar_cols.size()); ++t) {
+             t < static_cast<std::ptrdiff_t>(stellar_cols.size()); ++t)
+          errors.run([&] {
             const int j     = stellar_cols[t];
             const int j_col = column_of(j);
-            if (j_col < 0) continue;
+            if (j_col < 0) return;
             const auto& affected = param_datasets_[static_cast<std::size_t>(j)];
 
             const double h = eps_base * (std::abs(parameters[j]) + 1.0);
@@ -465,8 +472,9 @@ void MultiDatasetCost::operator()(const Eigen::VectorXd& parameters,
                 jacobians->col(j_col).segment(o, n) =
                     (r_eps.segment(o, n) - r0.segment(o, n)) / h;
             }
-        }
+          });
     }
+    errors.rethrow();
     //std::cout << "[CostFunc] Finite Differences done." << std::endl;
 }
 

@@ -29,8 +29,15 @@ public:
      *  full virtual path, e.g. anything starting "ssh://").               */
     virtual bool handles(const std::string& path) const = 0;
 
-    /*  Existence probe used by grid resolution; must not throw for a
-     *  merely missing file.                                               */
+    /*  Existence probe used by grid resolution and to tell holes in a grid
+     *  from broken files.  Must not throw for a merely missing file.
+     *
+     *  Return false only when the file definitely does not exist: GAEL then
+     *  treats that grid point as a hole and interpolates across it (see
+     *  "Holes in a grid" in ModelGrid.cpp).  When the answer is not known --
+     *  the host is unreachable, the transfer failed -- throw instead;
+     *  returning false there would silently turn an outage into different
+     *  models.                                                            */
     virtual bool exists(const std::string& virtual_path) = 0;
 
     /*  Blocking: ensure the file is available on local disk and return the

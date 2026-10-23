@@ -16,8 +16,13 @@
 #include <cstdint>
 #include <cstring>
 #include <array>
+#include <atomic>
+#include <functional>
 #include <limits>
 #include <mutex>
+#include <optional>
+#include <system_error>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 
@@ -27,7 +32,6 @@ static std::string fmt(double v, int prec)
     std::ostringstream s; s << std::fixed << std::setprecision(prec) << v;
     return s.str();
 }
-static double to_linear(const std::string& ax, double v) { return v; }
 
 /* ---------- hashing helpers for (path,vsini,resOffset,resSlope) ---------- */
 static std::size_t hash_combine(std::size_t seed, std::size_t v) noexcept
@@ -64,10 +68,17 @@ resolve_grid(const std::vector<std::string>& bases,
     throw std::runtime_error("Grid '" + rel_path + "' not found.");
 }
 
+/*  The missing files this grid object has interpolated across. */
+struct ModelGrid::GapLog {
+    std::mutex           mtx;
+    std::vector<GridGap> used;
+};
+
 /* =======================  ctor helpers  ============================ */
 ModelGrid::ModelGrid(const std::vector<std::string>& bases,
                      const std::string& rel_path)
-: base_(resolve_grid(bases, rel_path))
+: base_(resolve_grid(bases, rel_path)),
+  gap_log_(std::make_shared<GapLog>())
 {
     CCfits::FITS f(localize_grid_path(base_ + "/grid.fits"), CCfits::Read);
     CCfits::ExtHDU& ext = f.extension(1);
@@ -81,7 +92,8 @@ ModelGrid::ModelGrid(const std::vector<std::string>& bases,
         if (!is_stellar_axis(name)) species_.push_back(name);
     }
 }
-ModelGrid::ModelGrid(std::string abs) : base_(std::move(abs)) {}
+ModelGrid::ModelGrid(std::string abs)
+: base_(std::move(abs)), gap_log_(std::make_shared<GapLog>()) {}
 
 /* -------------------- misc internal helpers ------------------------ */
 static double param_for_axis(const std::string& n,
@@ -145,6 +157,291 @@ build_corners(const std::vector<const GridAxis*>& axes,
     return nodes;
 }
 
+/* =================================================================== *
+ *  Holes in a grid
+ *
+ *  grid.fits lists the values of every axis, but nothing guarantees a model
+ *  file exists for every combination: a failed synthesis run leaves a single
+ *  hole, and an index value can have no files at all.  A corner without a
+ *  file used to abort the fit.
+ *
+ *  The rule.  A missing node m is given the value linear interpolation
+ *  along one axis would give it,
+ *
+ *      f(m) = [(v+ - v_m) f(m-) + (v_m - v-) f(m+)] / (v+ - v-),
+ *
+ *  where m- and m+ are its two neighbours on that axis (v- and v+ their
+ *  coordinates on it).  Both neighbours must exist; a neighbour that is
+ *  itself missing is not looked through, so the substitute is never more than
+ *  one node away.  Among the axes where that works, the one with the
+ *  narrowest bridged interval wins, measured in units of the axis's mean
+ *  node spacing so that K and dex compare.  Within 1e-9 of a tie the cube's
+ *  first axis wins: grid.fits column order for the HHE cube, directory order
+ *  (z, HHE, x, g, t, abundance) for an element cube.  No such axis: the
+ *  evaluation fails with a message naming the grid point.
+ *
+ *  Why a value per node rather than a per-cell patch: the choice depends
+ *  only on the node and on which files exist, never on the cell being
+ *  evaluated or the order things were discovered in, so every cell touching
+ *  m sees the same f(m) and the interpolant stays continuous across all cell
+ *  boundaries -- the solver sees no step anywhere.  It is also exactly
+ *  "stretch the bracket over the wider interval": in a cell with m at one
+ *  end of an edge along the bridged axis, (1 - a) f(m) + a f(partner)
+ *  is linear interpolation from m- to m+.  So an index value with no files
+ *  at all -- every node in it bridged along its own axis -- behaves as if
+ *  grid.fits did not list it (to rounding; the weights are summed in a
+ *  different order).
+ *
+ *  Mechanically the missing corner is replaced by its two neighbours with
+ *  its weight split between them, merged into the corner list where a
+ *  neighbour is already a corner of the cell.  A grid without holes never
+ *  enters any of this and computes exactly what it always did.
+ *
+ *  Missing is not unreadable.  Only "this file does not exist" (ENOENT, or
+ *  a GridDataProvider whose exists() says no) is a hole.  Anything else --
+ *  EIO, a dead sshfs mount, a truncated file, a provider that cannot reach
+ *  its host -- fails the fit as before; bridging those would silently turn
+ *  an outage into different models.
+ *
+ *  What is learnt is kept for the life of the process: which files are
+ *  missing, which neighbours were found present, and the bridge chosen for
+ *  each hole.  A hole costs one failed read and a few existence probes the
+ *  first time and a lookup afterwards, which matters most through a remote
+ *  provider where each probe is a round trip.
+ * =================================================================== */
+
+/*  The corner file is definitely not there.  Internal: the corner loops
+ *  catch it, register the hole and plan the cube again.                    */
+struct MissingGridFile : std::runtime_error {
+    explicit MissingGridFile(const std::string& path)
+        : std::runtime_error("model file '" + path + "' does not exist") {}
+};
+
+enum class Presence { Present, Absent };
+
+/*  Absent only when that is certain; throws when it cannot tell.          */
+Presence probe_grid_file(const std::string& path)
+{
+    if (auto p = grid_data_provider(); p && p->handles(path))
+        return p->exists(path) ? Presence::Present : Presence::Absent;
+
+    std::error_code ec;
+    const fs::file_status st = fs::status(path, ec);
+    if (!ec)
+        return st.type() == fs::file_type::not_found ? Presence::Absent
+                                                     : Presence::Present;
+    if (ec == std::errc::no_such_file_or_directory) return Presence::Absent;
+    throw std::runtime_error("cannot tell whether model file '" + path +
+                             "' exists: " + ec.message());
+}
+
+using Coord  = std::vector<double>;
+using PathOf = std::function<std::string(const Coord&)>;
+
+struct Bridge { std::size_t axis; double lo, hi; };
+
+/*  One cube's holes, keyed by the directory its files live under
+ *  ("<grid>/HHE", "<grid>/FE"): two ModelGrid objects reading the same
+ *  files share what either learnt.                                         */
+struct CubeGaps {
+    std::vector<Coord>                    absent;
+    std::vector<std::pair<Coord, Bridge>> bridges;
+};
+
+std::mutex                                g_gap_mtx;
+std::unordered_map<std::string, CubeGaps> g_gaps;
+std::unordered_map<std::string, bool>     g_probed;   // neighbour path -> exists
+std::unordered_set<std::string>           g_warned;
+std::atomic<bool>                         g_any_gaps{false};
+
+bool contains(const std::vector<Coord>& v, const Coord& c)
+{
+    return std::find(v.begin(), v.end(), c) != v.end();
+}
+
+bool cube_has_gaps(const std::string& root)
+{
+    std::lock_guard<std::mutex> lk(g_gap_mtx);
+    auto it = g_gaps.find(root);
+    return it != g_gaps.end() && !it->second.absent.empty();
+}
+
+void register_absent(const std::string& root, const Coord& c,
+                     const std::string& path)
+{
+    std::lock_guard<std::mutex> lk(g_gap_mtx);
+    CubeGaps& cg = g_gaps[root];
+    g_probed[path] = false;
+    if (!contains(cg.absent, c)) {
+        cg.absent.push_back(c);
+        /*  A bridge chosen earlier may lean on this file, if it was probed
+         *  present and has since gone; the next lookup chooses again.     */
+        cg.bridges.clear();
+    }
+    g_any_gaps.store(true, std::memory_order_release);
+}
+
+/*  Does the node at `c` have a file?  Probed once per process.            */
+bool node_present(const std::string& root, const Coord& c,
+                  const std::string& path)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_gap_mtx);
+        if (auto it = g_gaps.find(root);
+            it != g_gaps.end() && contains(it->second.absent, c))
+            return false;
+        if (auto it = g_probed.find(path); it != g_probed.end())
+            return it->second;
+    }
+    /*  Outside the lock: through a remote provider this is a round trip. */
+    if (probe_grid_file(path) == Presence::Absent) {
+        register_absent(root, c, path);
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(g_gap_mtx);
+    g_probed[path] = true;
+    return true;
+}
+
+std::string describe_point(const std::vector<const GridAxis*>& axes,
+                           const Coord& c)
+{
+    std::ostringstream s;
+    for (std::size_t a = 0; a < axes.size(); ++a)
+        s << (a ? ", " : "") << axes[a]->name << '=' << c[a];
+    return s.str();
+}
+
+/*  The bridge for the missing node `m`: the rule at the top of this
+ *  section.  Warns the first time a hole is bridged in this process.      */
+Bridge bridge_for(const std::string& root,
+                  const std::vector<const GridAxis*>& axes,
+                  const Coord& m, const PathOf& path_of)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_gap_mtx);
+        if (auto it = g_gaps.find(root); it != g_gaps.end())
+            for (const auto& [node, b] : it->second.bridges)
+                if (node == m) return b;
+    }
+
+    std::optional<Bridge> best;
+    double best_score = 0.0;
+    for (std::size_t a = 0; a < axes.size(); ++a) {
+        const Vector& v = axes[a]->values;
+        const Eigen::Index n = v.size();
+        if (n < 3) continue;                       // no node has two neighbours
+
+        const Real* it = std::find(v.data(), v.data() + n, m[a]);
+        const Eigen::Index k = it - v.data();
+        if (k <= 0 || k >= n - 1) continue;        // at the edge of the axis
+
+        Coord lo = m; lo[a] = v[k - 1];
+        Coord hi = m; hi[a] = v[k + 1];
+        if (!node_present(root, lo, path_of(lo)) ||
+            !node_present(root, hi, path_of(hi)))
+            continue;
+
+        const double score = (v[k + 1] - v[k - 1]) /
+                             ((v[n - 1] - v[0]) / double(n - 1));
+        if (!best || score < best_score * (1.0 - 1e-9)) {
+            best       = Bridge{a, v[k - 1], v[k + 1]};
+            best_score = score;
+        }
+    }
+
+    const std::string path = path_of(m);
+    if (!best)
+        throw std::runtime_error(
+            "model file '" + path + "' is missing (grid point " +
+            describe_point(axes, m) + ") and cannot be interpolated "
+            "across: no grid axis has existing models on both sides of it");
+
+    std::lock_guard<std::mutex> lk(g_gap_mtx);
+    g_gaps[root].bridges.emplace_back(m, *best);
+    if (g_warned.insert(path).second)
+        std::cerr << "Warning: model file " << path << " is missing; "
+                  << "interpolating across it along " << axes[best->axis]->name
+                  << " between " << best->lo << " and " << best->hi << '\n';
+    return *best;
+}
+
+/*  Replace every weighted corner that is a known hole by its bridge's two
+ *  neighbours.  Returns the list untouched -- same corners, same order, same
+ *  weights -- when this cube has no known holes.                           */
+std::vector<CubeCorner>
+bridge_gaps(const std::string& root,
+            const std::vector<const GridAxis*>& axes,
+            std::vector<CubeCorner> nodes,
+            const PathOf& path_of,
+            std::vector<GridGap>& used)
+{
+    if (!g_any_gaps.load(std::memory_order_acquire)) return nodes;
+
+    std::vector<Coord> absent;
+    {
+        std::lock_guard<std::mutex> lk(g_gap_mtx);
+        auto it = g_gaps.find(root);
+        if (it == g_gaps.end() || it->second.absent.empty()) return nodes;
+        absent = it->second.absent;
+    }
+
+    auto add = [&](const Coord& c, double w) {
+        for (auto& nd : nodes)
+            if (nd.coord == c) { nd.weight += w; return; }
+        nodes.push_back({c, w});
+    };
+
+    const std::size_t n0 = nodes.size();          // neighbours are never holes
+    for (std::size_t i = 0; i < n0; ++i) {
+        if (nodes[i].weight == 0.0 || !contains(absent, nodes[i].coord))
+            continue;
+        const Coord  m = nodes[i].coord;
+        const Bridge b = bridge_for(root, axes, m, path_of);
+
+        const double w     = nodes[i].weight;
+        const double f_hi  = (m[b.axis] - b.lo) / (b.hi - b.lo);
+        nodes[i].weight = 0.0;
+        Coord lo = m; lo[b.axis] = b.lo;
+        Coord hi = m; hi[b.axis] = b.hi;
+        add(lo, w * (1.0 - f_hi));
+        add(hi, w * f_hi);
+
+        GridGap g;
+        g.file = path_of(m);
+        for (std::size_t a = 0; a < axes.size(); ++a)
+            g.point.emplace_back(axes[a]->name, m[a]);
+        g.axis = axes[b.axis]->name;
+        g.from = b.lo;
+        g.to   = b.hi;
+        used.push_back(std::move(g));
+    }
+    return nodes;
+}
+
+/*  Open one corner file and hand extension 1 to `read`.  A failure is
+ *  classified before it propagates: a file that is not there becomes
+ *  MissingGridFile, which the corner loops bridge; one that is there but
+ *  cannot be read -- or whose existence cannot be established -- fails the
+ *  fit.  CCfits's exceptions do not derive from std::exception, so they are
+ *  translated here; left alone they went past every handler to
+ *  std::terminate.                                                         */
+template <typename Read>
+void read_corner_file(const std::string& path, Read&& read)
+{
+    std::string why;
+    try {
+        CCfits::FITS f(localize_grid_path(path), CCfits::Read);
+        read(f.extension(1));
+        return;
+    }
+    catch (const CCfits::FitsException& e) { why = e.message(); }
+    catch (const std::exception& e)        { why = e.what(); }
+
+    if (probe_grid_file(path) == Presence::Absent) throw MissingGridFile(path);
+    throw std::runtime_error("cannot read model file '" + path + "': " + why);
+}
+
 /*  Guards the lazily-filled per-species wavelength grids of every ModelGrid;
  *  a mutex member would make ModelGrid non-movable.                        */
 std::mutex g_lambda_mtx;
@@ -167,7 +464,165 @@ bool use_rot_segments()
     return v;
 }
 
+/*  The HHE cube spans the stellar axes in grid.fits order; its file path
+ *  names them in directory order, Z/HE/X/G/T.  An axis the grid lacks
+ *  reads as 0, as it always did.                                           */
+struct HheNode { double t = 0, g = 0, z = 0, h = 0, x = 0; };
+
+struct HheCube {
+    std::vector<const GridAxis*> axes;
+    int it = -1, ig = -1, iz = -1, ih = -1, ix = -1;   // position in `axes`
+
+    HheNode node(const Coord& c) const
+    {
+        HheNode n;
+        if (it >= 0) n.t = c[it];
+        if (ig >= 0) n.g = c[ig];
+        if (iz >= 0) n.z = c[iz];
+        if (ih >= 0) n.h = c[ih];
+        if (ix >= 0) n.x = c[ix];
+        return n;
+    }
+};
+
+HheCube hhe_cube_axes(const std::vector<GridAxis>& all)
+{
+    HheCube cube;
+    for (const auto& ax : all) {
+        if (!ModelGrid::is_stellar_axis(ax.name)) continue;
+        const int pos = static_cast<int>(cube.axes.size());
+        if      (ax.name == "t")   cube.it = pos;
+        else if (ax.name == "g")   cube.ig = pos;
+        else if (ax.name == "z")   cube.iz = pos;
+        else if (ax.name == "HHE") cube.ih = pos;
+        else if (ax.name == "x")   cube.ix = pos;
+        cube.axes.push_back(&ax);
+    }
+    return cube;
+}
+
+std::string hhe_corner_path(const std::string& base, const HheCube& cube,
+                            const Coord& c)
+{
+    const HheNode nd = cube.node(c);
+    std::ostringstream oss;
+    oss<<base<<"/HHE"
+       <<"/Z"<<fmt(nd.z,2)
+       <<"/HE"<<fmt(nd.h,3)
+       <<"/X"<<fmt(nd.x,2)
+       <<"/G"<<fmt(nd.g,3)
+       <<"/T"<<int(std::lround(nd.t))<<".fits";
+    return oss.str();
+}
+
+/*  <S>/Z%.2f/HE%.3f/X%.2f/G%.3f/T%.0f/<A>.fits, coordinates in that order. */
+std::string element_corner_path(const std::string& base,
+                                const std::string& name, const Coord& c)
+{
+    std::ostringstream oss;
+    oss << base << '/' << name
+        << "/Z"  << fmt(c[0], 2)
+        << "/HE" << fmt(c[1], 3)
+        << "/X"  << fmt(c[2], 2)
+        << "/G"  << fmt(c[3], 3)
+        << "/T"  << int(std::lround(c[4]))
+        << '/'   << fmt(c[5], 3) << ".fits";
+    return oss.str();
+}
+
 } // namespace
+
+/* =================================================================== *
+ *  Which gaps a fit used
+ * =================================================================== */
+void ModelGrid::record_gaps(const std::vector<GridGap>& used) const
+{
+    if (used.empty()) return;
+    std::lock_guard<std::mutex> lk(gap_log_->mtx);
+    for (const auto& g : used) {
+        const bool seen = std::any_of(
+            gap_log_->used.begin(), gap_log_->used.end(),
+            [&](const GridGap& h) { return h.file == g.file; });
+        if (!seen) gap_log_->used.push_back(g);
+    }
+}
+
+std::vector<GridGap> ModelGrid::gaps_used() const
+{
+    std::lock_guard<std::mutex> lk(gap_log_->mtx);
+    return gap_log_->used;
+}
+
+bool ModelGrid::any_gaps_known()
+{
+    return g_any_gaps.load(std::memory_order_acquire);
+}
+
+void ModelGrid::note_gaps(double teff, double logg, double z, double he,
+                          double xi,
+                          const std::vector<int>&    species,
+                          const std::vector<double>& abundances) const
+{
+    if (!any_gaps_known()) return;
+
+    /*  Corners are only built for cubes known to have holes: once one grid
+     *  in the process has one, every model evaluation of every grid passes
+     *  through here.                                                       */
+    std::vector<GridGap> used;
+    if (cube_has_gaps(base_ + "/HHE")) {
+        const auto cube = hhe_cube_axes(axes_);
+        std::vector<double> vals;
+        for (const GridAxis* ax : cube.axes)
+            vals.push_back(param_for_axis(ax->name, teff, logg, z, he, xi));
+        (void)bridge_gaps(base_ + "/HHE", cube.axes,
+                          build_corners(cube.axes, vals),
+                          [&](const Coord& c) {
+                              return hhe_corner_path(base_, cube, c);
+                          },
+                          used);
+    }
+    for (int s : species) {
+        if (s < 0 || s >= static_cast<int>(species_.size()) ||
+            s >= static_cast<int>(abundances.size()))
+            continue;
+        const std::string& name = species_[static_cast<std::size_t>(s)];
+        if (!cube_has_gaps(base_ + '/' + name)) continue;
+        const auto axes = element_cube_axes(s);
+        const std::vector<double> vals = {
+            z, he, xi, logg, teff, abundances[static_cast<std::size_t>(s)] };
+        (void)bridge_gaps(base_ + '/' + name, axes, build_corners(axes, vals),
+                          [&](const Coord& c) {
+                              return element_corner_path(base_, name, c);
+                          },
+                          used);
+    }
+    record_gaps(used);
+}
+
+/*  The axes an element cube spans: the five stellar ones, then the
+ *  element's own abundance axis (ISIS's interpol_syn appends "/%.3f" to the
+ *  path for exactly this reason).  Path order is fixed by the directory
+ *  layout, so the axis order is too.                                       */
+std::vector<const GridAxis*> ModelGrid::element_cube_axes(int s) const
+{
+    const std::string& name = species_[static_cast<std::size_t>(s)];
+    const GridAxis* ax_z = nullptr; const GridAxis* ax_he = nullptr;
+    const GridAxis* ax_x = nullptr; const GridAxis* ax_g  = nullptr;
+    const GridAxis* ax_t = nullptr; const GridAxis* ax_a  = nullptr;
+
+    for (const auto& ax : axes_) {
+        if      (ax.name == "z")   ax_z  = &ax;
+        else if (ax.name == "HHE") ax_he = &ax;
+        else if (ax.name == "x")   ax_x  = &ax;
+        else if (ax.name == "g")   ax_g  = &ax;
+        else if (ax.name == "t")   ax_t  = &ax;
+        else if (ax.name == name)  ax_a  = &ax;
+    }
+    if (!ax_z || !ax_he || !ax_x || !ax_g || !ax_t || !ax_a)
+        throw std::runtime_error("grid '" + base_ + "' lacks an axis needed "
+                                 "for element '" + name + "'");
+    return { ax_z, ax_he, ax_x, ax_g, ax_t, ax_a };
+}
 
 /* =================================================================== */
 Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
@@ -177,96 +632,26 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
 {
     //std::cout << "[LoadSpec] Building Interpolation Hypercube." << std::endl;
     /* ---------- build interpolation hyper-cube -------------------- */
-    struct Node { double t,g,z,h,x,w; };
-    std::array<Node,32> nodes{}; nodes[0] = {0,0,0,0,0,1}; int nN=1;
+    /*  Element axes are not dimensions of *this* cube: ISIS factorises them
+     *  out into one cube per element whose spectra multiply onto this one
+     *  (see load_element_factor).                                         */
+    const auto cube = hhe_cube_axes(axes_);
+    std::vector<double> vals;
+    for (const GridAxis* ax : cube.axes)
+        vals.push_back(param_for_axis(ax->name,teff,logg,z,he,xi));
 
-    for (const auto& ax: axes_) {
-        /*  Element axes are not dimensions of *this* cube: ISIS factorises
-         *  them out into one cube per element whose spectra multiply onto
-         *  this one (see load_element_factor).  Before this guard, a
-         *  grid.fits carrying an FE column threw out of param_for_axis.   */
-        if (!is_stellar_axis(ax.name)) continue;
-
-        const double p = param_for_axis(ax.name,teff,logg,z,he,xi);
-        const Vector& grid = ax.values;
-
-        if (grid.size()==1) {                 // constant axis
-            for (int i=0;i<nN;++i) {
-                if      (ax.name=="t") nodes[i].t = grid[0];
-                else if (ax.name=="g") nodes[i].g = grid[0];
-                else if (ax.name=="z") nodes[i].z = grid[0];
-                else if (ax.name=="HHE")nodes[i].h = grid[0];
-                else if (ax.name=="x") nodes[i].x = grid[0];
-            }
-            continue;
-        }
-
-        auto it = std::lower_bound(grid.data(),grid.data()+grid.size(),p);
-        int hi = (it==grid.data()+grid.size())?grid.size()-1:int(it-grid.data());
-        int lo = (hi==0)?0:hi-1;
-
-        double a_hi = (grid[hi]==grid[lo])?0.0
-                      :(to_linear(ax.name,p)-to_linear(ax.name,grid[lo]))
-                       /(to_linear(ax.name,grid[hi])-to_linear(ax.name,grid[lo]));
-        double a_lo = 1.0-a_hi;
-
-        for (int i=nN-1;i>=0;--i) nodes[i+nN]=nodes[i];
-        for (int i=0;i<nN;++i) {
-            Node& A = nodes[i]; Node& B = nodes[i+nN];
-            if      (ax.name=="t"){A.t=grid[lo];B.t=grid[hi];}
-            else if (ax.name=="g"){A.g=grid[lo];B.g=grid[hi];}
-            else if (ax.name=="z"){A.z=grid[lo];B.z=grid[hi];}
-            else if (ax.name=="HHE"){A.h=grid[lo];B.h=grid[hi];}
-            else if (ax.name=="x"){A.x=grid[lo];B.x=grid[hi];}
-            A.w*=a_lo; B.w*=a_hi;
-        }
-        nN*=2;
-    }
-    //std::cout << "[LoadSpec] Building Tiny Local Cache." << std::endl;
-
-    /* ---------- tiny per-call local cache (≤32) -------------------- */
-    using Key = std::uint64_t;
-    auto pack = [](int t,int g,int z,int h,int x)->Key{
-        return Key(t) | (Key(g)<<12) | (Key(z)<<24)
-                     | (Key(h)<<36) | (Key(x)<<48);
-    };
-    struct Entry { SpectrumPtr sp; bool ok=false; };
-
-    struct LocalCache {
-        std::array<Key,32> keys{};
-        std::array<Entry,32> ent{};
-        std::size_t n=0;
-        Entry& operator[](Key k){
-            for(std::size_t i=0;i<n;++i) if(keys[i]==k) return ent[i];
-            keys[n]=k; return ent[n++];                // new slot
-        }
-    } lc;
+    const std::vector<CubeCorner> corners = build_corners(cube.axes, vals);
     //std::cout << "[LoadSpec] Corner fetching." << std::endl;
 
-    auto corner_path = [&](const Node& nd) -> std::string {
-        std::ostringstream oss;
-        oss<<base_<<"/HHE"
-           <<"/Z"<<fmt(nd.z,2)
-           <<"/HE"<<fmt(nd.h,3)
-           <<"/X"<<fmt(nd.x,2)
-           <<"/G"<<fmt(nd.g,3)
-           <<"/T"<<int(std::lround(nd.t))<<".fits";
-        return oss.str();
+    const PathOf corner_path = [&](const Coord& c) {
+        return hhe_corner_path(base_, cube, c);
     };
 
-    /*  A remote provider can pipeline all corner files of this evaluation
-     *  in one round trip instead of paying the latency per corner.        */
-    if (auto prov = grid_data_provider(); prov && prov->handles(base_)) {
-        std::vector<std::string> want;
-        want.reserve(static_cast<std::size_t>(nN));
-        for (int i=0;i<nN;++i)
-            if (nodes[i].w != 0.0) want.push_back(corner_path(nodes[i]));
-        prov->prefetch(want);
-    }
-
     /* ---------- helper to fetch / cache one corner ---------------- */
-    auto fetch = [&](const Node& nd)->const Spectrum& {
+    /*  nullptr: the file turned out not to exist (now registered).       */
+    auto fetch = [&](const CubeCorner& cn)->SpectrumPtr {
         //std::cout << "[LoadSpec](fetch) Fetching..." << std::endl;
+        const HheNode nd = cube.node(cn.coord);
 
         int Ti=int(std::lround(nd.t));
         int Gi=int(std::lround(nd.g*100));
@@ -274,7 +659,9 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
         int Hi=int(std::lround(nd.h*1000));
         int Xi=int(std::lround(nd.x*100));
 
-        Key k = pack(Ti,Gi,Zi,Hi,Xi);
+        using Key = std::uint64_t;
+        Key k = Key(Ti) | (Key(Gi)<<12) | (Key(Zi)<<24)
+                        | (Key(Hi)<<36) | (Key(Xi)<<48);
         /*  The node coordinates alone do not identify a corner: two grids
          *  with the same axis values (sdB/processed vs processed_25, or a
          *  local and a streamed copy of one grid) would collide in the
@@ -286,16 +673,14 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
         k = hash_combine(k, hash_double(resSlope));
         k = hash_combine(k, window_key_);             // slice is part of the key
 
-        Entry& e = lc[k];
         //std::cout << "[LoadSpec](fetch) Entry hashes done..." << std::endl;
-        if (!e.ok) {
-            if (auto sp = SpectrumCache::instance().try_get(k))
-                e.sp = std::move(sp);                           // global hit
-            else {
-                //std::cout << "[LoadSpec](fetch) Cache miss, calculating." << std::endl;
-                const std::string path = corner_path(nd);
+        if (auto sp = SpectrumCache::instance().try_get(k))
+            return sp;                                          // global hit
 
-                e.sp = SpectrumCache::instance()
+        //std::cout << "[LoadSpec](fetch) Cache miss, calculating." << std::endl;
+        const std::string path = corner_path(cn.coord);
+        try {
+                return SpectrumCache::instance()
                          .insert_if_absent(k,[&]{
                              //std::cout << "[LoadSpec](fetch) Reading .fits ." << std::endl;
                              Spectrum raw = read_fits(path, with_continuum);
@@ -356,35 +741,59 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                              }
                              return result;
                          });
-            }
-            e.ok = true;
+        } catch (const MissingGridFile&) {
+            register_absent(base_ + "/HHE", cn.coord, path);
+            return nullptr;
         }
-        return *e.sp;
     };
     //std::cout << "[LoadSpec] Interpolating Cube." << std::endl;
 
     /* ---------- weighted sum over the cube ------------------------ */
-    Spectrum out; bool first=true; double wsum=0.0;
+    /*  Planned again whenever a corner turns out to be a hole: each round
+     *  registers one more missing file, so this ends.                     */
+    Spectrum out; double wsum=0.0;
+    for (bool complete = false; !complete; ) {
+        std::vector<GridGap> used;
+        const std::vector<CubeCorner> nodes =
+            bridge_gaps(base_ + "/HHE", cube.axes, corners, corner_path, used);
 
-    for(int i=0;i<nN;++i){
-        /* A parameter sitting exactly on a grid node gives its partner corner
-           weight 0; fetching it would read (and convolve) a file that cannot
-           contribute.  With one pinned axis that is half of all corners.      */
-        if (nodes[i].w == 0.0) continue;
-        //std::cout << "[LoadSpec] Fetching Spec." << std::endl;
-        const Spectrum& sp = fetch(nodes[i]);
-        //std::cout << "[LoadSpec] Fetched." << std::endl;
-        if(first){
-            out = sp; out.flux.setZero();
-            if (with_continuum) { out.cont.setZero(); out.cont_den.setZero(); }
-            first=false;
+        /*  A remote provider can pipeline all corner files of this
+         *  evaluation in one round trip instead of paying the latency per
+         *  corner.  Known holes are left out; their substitutes are in.   */
+        if (auto prov = grid_data_provider(); prov && prov->handles(base_)) {
+            std::vector<std::string> want;
+            want.reserve(nodes.size());
+            for (const auto& nd : nodes)
+                if (nd.weight != 0.0) want.push_back(corner_path(nd.coord));
+            prov->prefetch(want);
         }
-        out.flux += sp.flux * nodes[i].w;
-        if (with_continuum) {
-            out.cont     += sp.cont     * nodes[i].w;
-            out.cont_den += sp.cont_den * nodes[i].w;
+
+        out = Spectrum{}; wsum = 0.0; complete = true;
+        bool first=true;
+        for (const auto& nd : nodes){
+            /* A parameter sitting exactly on a grid node gives its partner
+               corner weight 0; fetching it would read (and convolve) a file
+               that cannot contribute.  With one pinned axis that is half of
+               all corners.                                                 */
+            if (nd.weight == 0.0) continue;
+            //std::cout << "[LoadSpec] Fetching Spec." << std::endl;
+            const SpectrumPtr ptr = fetch(nd);
+            if (!ptr) { complete = false; break; }
+            const Spectrum& sp = *ptr;
+            //std::cout << "[LoadSpec] Fetched." << std::endl;
+            if(first){
+                out = sp; out.flux.setZero();
+                if (with_continuum) { out.cont.setZero(); out.cont_den.setZero(); }
+                first=false;
+            }
+            out.flux += sp.flux * nd.weight;
+            if (with_continuum) {
+                out.cont     += sp.cont     * nd.weight;
+                out.cont_den += sp.cont_den * nd.weight;
+            }
+            wsum     += nd.weight;
         }
-        wsum     += nodes[i].w;
+        if (complete) record_gaps(used);
     }
     //std::cout << "[LoadSpec] Done!" << std::endl;
     if(wsum>0.0) out.flux.array() /= wsum;
@@ -503,73 +912,58 @@ Vector ModelGrid::load_element_factor(int    s,
         throw std::runtime_error("species index out of range");
     const std::string& name = species_[static_cast<std::size_t>(s)];
 
-    /* ---- the axes this cube spans: the five stellar ones, then the
-     *      element's own abundance axis (ISIS's interpol_syn appends "/%.3f"
-     *      to the path for exactly this reason).                          */
-    std::vector<const GridAxis*> axes;
-    std::vector<double>          vals;
-    const GridAxis* ax_z = nullptr; const GridAxis* ax_he = nullptr;
-    const GridAxis* ax_x = nullptr; const GridAxis* ax_g  = nullptr;
-    const GridAxis* ax_t = nullptr; const GridAxis* ax_a  = nullptr;
+    const std::vector<const GridAxis*> axes = element_cube_axes(s);
+    const std::vector<double> vals = { z, he, xi, logg, teff, abundance };
 
-    for (const auto& ax : axes_) {
-        if      (ax.name == "z")   ax_z  = &ax;
-        else if (ax.name == "HHE") ax_he = &ax;
-        else if (ax.name == "x")   ax_x  = &ax;
-        else if (ax.name == "g")   ax_g  = &ax;
-        else if (ax.name == "t")   ax_t  = &ax;
-        else if (ax.name == name)  ax_a  = &ax;
-    }
-    if (!ax_z || !ax_he || !ax_x || !ax_g || !ax_t || !ax_a)
-        throw std::runtime_error("grid '" + base_ + "' lacks an axis needed "
-                                 "for element '" + name + "'");
-
-    /*  Path order is fixed by the directory layout, so the axis order is
-     *  too: <S>/Z%.2f/HE%.3f/X%.2f/G%.3f/T%.0f/<A>.fits                    */
-    axes = { ax_z, ax_he, ax_x, ax_g, ax_t, ax_a };
-    vals = { z,    he,    xi,   logg, teff, abundance };
-
-    const auto nodes = build_corners(axes, vals);
-
-    auto element_path = [&](const CubeCorner& nd) -> std::string {
-        std::ostringstream oss;
-        oss << base_ << '/' << name
-            << "/Z"  << fmt(nd.coord[0], 2)
-            << "/HE" << fmt(nd.coord[1], 3)
-            << "/X"  << fmt(nd.coord[2], 2)
-            << "/G"  << fmt(nd.coord[3], 3)
-            << "/T"  << int(std::lround(nd.coord[4]))
-            << '/'   << fmt(nd.coord[5], 3) << ".fits";
-        return oss.str();
+    const auto corners = build_corners(axes, vals);
+    const std::string root = base_ + '/' + name;
+    const PathOf element_path = [&](const Coord& c) {
+        return element_corner_path(base_, name, c);
     };
 
-    /*  Same batching hint as load_spectrum: a remote provider fetches all
-     *  corners of this element cube in one round trip.                    */
-    if (auto prov = grid_data_provider(); prov && prov->handles(base_)) {
-        std::vector<std::string> want;
-        want.reserve(nodes.size());
-        for (const auto& nd : nodes)
-            if (nd.weight != 0.0) want.push_back(element_path(nd));
-        prov->prefetch(want);
-    }
+    /*  Holes are bridged exactly as in load_spectrum, over all six axes.  */
+    Vector out; double wsum = 0.0;
+    for (bool complete = false; !complete; ) {
+        std::vector<GridGap> used;
+        const auto nodes = bridge_gaps(root, axes, corners, element_path, used);
 
-    Vector out; bool first = true; double wsum = 0.0;
-    for (const auto& nd : nodes) {
-        if (nd.weight == 0.0) continue;      // pinned axis: half the corners
+        /*  Same batching hint as load_spectrum: a remote provider fetches
+         *  all corners of this element cube in one round trip.            */
+        if (auto prov = grid_data_provider(); prov && prov->handles(base_)) {
+            std::vector<std::string> want;
+            want.reserve(nodes.size());
+            for (const auto& nd : nodes)
+                if (nd.weight != 0.0) want.push_back(element_path(nd.coord));
+            prov->prefetch(want);
+        }
 
-        const std::string epath = element_path(nd);
+        out = Vector(); wsum = 0.0; complete = true;
+        bool first = true;
+        for (const auto& nd : nodes) {
+            if (nd.weight == 0.0) continue;      // pinned axis: half the corners
 
-        std::size_t key = std::hash<std::string>{}(epath);
-        key = hash_combine(key, 0xE1E3E27ULL);
-        key = hash_combine(key, window_key_);
+            const std::string epath = element_path(nd.coord);
 
-        SpectrumPtr sp = SpectrumCache::instance().insert_if_absent(key, [&] {
-            return read_element_fits(epath, s);
-        });
+            std::size_t key = std::hash<std::string>{}(epath);
+            key = hash_combine(key, 0xE1E3E27ULL);
+            key = hash_combine(key, window_key_);
 
-        if (first) { out = Vector::Zero(sp->flux.size()); first = false; }
-        out += sp->flux * nd.weight;
-        wsum     += nd.weight;
+            SpectrumPtr sp;
+            try {
+                sp = SpectrumCache::instance().insert_if_absent(key, [&] {
+                    return read_element_fits(epath, s);
+                });
+            } catch (const MissingGridFile&) {
+                register_absent(root, nd.coord, epath);
+                complete = false;
+                break;
+            }
+
+            if (first) { out = Vector::Zero(sp->flux.size()); first = false; }
+            out += sp->flux * nd.weight;
+            wsum     += nd.weight;
+        }
+        if (complete) record_gaps(used);
     }
     if (wsum > 0.0) out.array() /= wsum;
     return out;
@@ -587,10 +981,10 @@ Spectrum ModelGrid::read_element_fits(const std::string& path, int s) const
 {
     const Vector& lam = species_lambda(s);
 
-    CCfits::FITS f(localize_grid_path(path), CCfits::Read);
-    CCfits::ExtHDU& ext = f.extension(1);
     std::vector<Real> fl;
-    ext.column("f").read(fl, 1, ext.rows());
+    read_corner_file(path, [&](CCfits::ExtHDU& ext) {
+        ext.column("f").read(fl, 1, ext.rows());
+    });
 
     /*  The window slice applied to lambda has to be applied identically
      *  here; species_lambda() sliced with the same bounds, so recover the
@@ -650,18 +1044,17 @@ Spectrum ModelGrid::read_fits(const std::string& path, bool with_continuum) cons
         }
     }
 
-    CCfits::FITS f(localize_grid_path(path), CCfits::Read);
-    CCfits::ExtHDU& ext = f.extension(1);
-
     /*  Column "f" is the normalised flux, column "c" the flux-calibrated one
      *  (SURFACE, erg/s/cm^2/A) -- ISIS's `nonorm` qualifier picks "c".  A
      *  binary fit is built from "c" and keeps "f" as the divisor that turns
      *  it into a continuum; a single-component fit only ever needs "f".     */
-    Vec fl; ext.column(with_continuum ? "c" : "f").read(fl,1,ext.rows());
-    Vec fn;
-    if (with_continuum) ext.column("f").read(fn,1,ext.rows());
+    Vec fl, fn, lt;
+    read_corner_file(path, [&](CCfits::ExtHDU& ext) {
+        ext.column(with_continuum ? "c" : "f").read(fl,1,ext.rows());
+        if (with_continuum) ext.column("f").read(fn,1,ext.rows());
+        if (lam.size()==0) ext.column("l").read(lt,1,ext.rows());
+    });
     if(lam.size()==0){
-        Vec lt; ext.column("l").read(lt,1,ext.rows());
         lam = Eigen::Map<Vector>(lt.data(),lt.size());
         std::lock_guard<std::mutex> lk(wave_mtx);
         wave_cache.emplace(base_,lam);

@@ -143,6 +143,16 @@ static api::FitResult make_fit_result()
 
     r.rejected_files   = {"spec_bad.txt"};
     r.rejected_indices = {1};
+    {
+        api::GridGapResult g;
+        g.component = 0;
+        g.file      = "/grids/x/HHE/Z0.00/HE-1.000/X2.00/G3.800/T8560.fits";
+        g.point     = {{"t", 8560.0}, {"g", 3.8}, {"x", 2.0}, {"z", 0.0}};
+        g.axis      = "t";
+        g.from      = 8500.0;
+        g.to        = 8625.0;
+        r.grid_gaps.push_back(g);
+    }
     r.raw_params        = {12.5, 13.5, 28123.5};
     r.raw_uncertainties = {0.5, 0.5, 150.25};
     r.raw_free_mask     = {true, true, true};
@@ -235,6 +245,11 @@ int main()
               "light fractions survive");
         CHECK(back.rejected_indices == std::vector<int>{1},
               "rejected indices survive");
+        CHECK(back.grid_gaps.size() == 1 &&
+                  back.grid_gaps[0].axis == "t" &&
+                  back.grid_gaps[0].point.at("g") == 3.8 &&
+                  back.grid_gaps[0].to == 8625.0,
+              "grid gaps survive");
         CHECK(back.raw_free_mask.size() == 3, "raw mask survives");
         CHECK(back.resources.peak_rss_bytes == 3221225472LL &&
                   back.resources.wall_seconds == 12.25 &&

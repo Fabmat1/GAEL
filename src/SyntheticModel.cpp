@@ -369,6 +369,13 @@ SpectrumPtr compute_synthetic_cached(const ModelGrid&    grid,
                        with_continuum);
     hash_combine(full_key, grid.window_key());
 
+    /*  Both caches below are process-wide, so this model may have been built
+     *  by another fit, and then load_spectrum never runs for this one to
+     *  record the grid gaps the model is interpolated across.             */
+    if (ModelGrid::any_gaps_known())
+        grid.note_gaps(pars.teff, pars.logg, pars.z, pars.he, pars.xi,
+                       active_species(grid, pars), pars.abundances);
+
     //std::cout << "[CompSynth] Made Hash. Spectrum Cache." << std::endl;     
     /* ===== 2nd-level cache (final spectrum) ======================== */
     SpectrumPtr final_sp =

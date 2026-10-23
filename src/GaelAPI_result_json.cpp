@@ -158,6 +158,17 @@ void fit_result_to_json_file(const FitResult& r, const std::string& path)
 
     j["rejected_files"]    = r.rejected_files;
     j["rejected_indices"]  = r.rejected_indices;
+
+    // Optional: absent from results written before grid gaps were bridged.
+    json gaps = json::array();
+    for (const auto& g : r.grid_gaps)
+        gaps.push_back(json{{"component", g.component},
+                            {"file",      g.file},
+                            {"point",     g.point},
+                            {"axis",      g.axis},
+                            {"from",      g.from},
+                            {"to",        g.to}});
+    j["grid_gaps"] = std::move(gaps);
     j["raw_params"]        = r.raw_params;
     j["raw_uncertainties"] = r.raw_uncertainties;
     j["raw_free_mask"]     = r.raw_free_mask;
@@ -248,6 +259,17 @@ FitResult fit_result_from_json_file(const std::string& path)
         r.rejected_files = j["rejected_files"].get<std::vector<std::string>>();
     if (j.contains("rejected_indices"))
         r.rejected_indices = j["rejected_indices"].get<std::vector<int>>();
+    if (j.contains("grid_gaps"))
+        for (const auto& gj : j["grid_gaps"]) {
+            GridGapResult g;
+            g.component = gj.at("component").get<int>();
+            g.file      = gj.at("file").get<std::string>();
+            g.point     = gj.at("point").get<std::map<std::string, double>>();
+            g.axis      = gj.at("axis").get<std::string>();
+            g.from      = gj.at("from").get<double>();
+            g.to        = gj.at("to").get<double>();
+            r.grid_gaps.push_back(std::move(g));
+        }
     r.raw_params        = j.at("raw_params").get<std::vector<double>>();
     r.raw_uncertainties = j.at("raw_uncertainties").get<std::vector<double>>();
     r.raw_free_mask     = j.at("raw_free_mask").get<std::vector<bool>>();

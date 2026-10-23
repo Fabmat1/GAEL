@@ -111,6 +111,13 @@ SpectrumResult::SpectrumResult(SpectrumResult&&) noexcept                 = defa
 SpectrumResult& SpectrumResult::operator=(const SpectrumResult&)          = default;
 SpectrumResult& SpectrumResult::operator=(SpectrumResult&&) noexcept      = default;
 
+GridGapResult::GridGapResult()                                            = default;
+GridGapResult::~GridGapResult()                                           = default;
+GridGapResult::GridGapResult(const GridGapResult&)                        = default;
+GridGapResult::GridGapResult(GridGapResult&&) noexcept                    = default;
+GridGapResult& GridGapResult::operator=(const GridGapResult&)             = default;
+GridGapResult& GridGapResult::operator=(GridGapResult&&) noexcept         = default;
+
 FitResult::FitResult()                                                    = default;
 FitResult::~FitResult()                                                   = default;
 FitResult::FitResult(const FitResult&)                                    = default;
@@ -942,6 +949,29 @@ FitResult GaelSession::run_impl()
         }
         R.cont_jitter_K = gs.cont_jitter_K;
     }
+
+    /* ---- holes in the grids that the models above were built across ---- *
+     *  Collected last so the jitter refits count too: their models feed the
+     *  reported errors.                                                     */
+    for (std::size_t c = 0; c < model.grids.size(); ++c)
+        for (const auto& g : model.grids[c].gaps_used()) {
+            GridGapResult gr;
+            gr.component = static_cast<int>(c);
+            gr.file      = g.file;
+            for (const auto& [axis, v] : g.point) gr.point[axis] = v;
+            gr.axis = g.axis;
+            gr.from = g.from;
+            gr.to   = g.to;
+            R.grid_gaps.push_back(std::move(gr));
+
+            std::ostringstream w;
+            if (model.grids.size() > 1) w << "component " << c + 1 << ": ";
+            w << "model file " << g.file << " is missing; interpolated "
+              << "across it along " << g.axis << " between " << g.from
+              << " and " << g.to;
+            R.warnings.push_back(w.str());
+            log("warning: " + w.str());
+        }
 
     if (auto stats = ::specfit::memory_stats_line(); !stats.empty())
         log(stats);

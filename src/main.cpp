@@ -524,6 +524,8 @@ int main(int argc, char **argv) {
                   << "  spectra used    = " << result.spectra.size() << '\n'
                   << "  spectra rejected= " << result.rejected_files.size()
                   << '\n';
+        for (const auto& w : result.warnings)
+            std::cerr << "Warning: " << w << '\n';
 
     } catch (const std::exception &e) {
         std::cerr << "Error: " << e.what() << '\n';

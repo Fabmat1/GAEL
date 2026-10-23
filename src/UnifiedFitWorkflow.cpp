@@ -2,6 +2,7 @@
 #include "specfit/UnifiedFitWorkflow.hpp"
 #include "specfit/MultiDatasetCost.hpp"
 #include "specfit/SimpleLM.hpp"
+#include "specfit/ParallelErrors.hpp"
 #include "specfit/Powell.hpp"
 #include <filesystem>
 #include <iostream>
@@ -930,6 +931,7 @@ void UnifiedFitWorkflow::stage6_rescale_and_reject()
                     "rescaling sigma from the local scatter, rejecting outliers");
 
         /* =========   data set loop  (parallel if requested)   ========= */
+        ParallelErrors errors;
         #pragma omp parallel for schedule(dynamic) if(nthreads_>1)
         for (int d = 0; d < NDS; ++d)
         {
@@ -946,7 +948,11 @@ void UnifiedFitWorkflow::stage6_rescale_and_reject()
             ds.obs.sigma = sigma0[d];
 
             /* ---- model counts ----------------------------------------- */
-            ArrayXd model = get_model_for_dataset(static_cast<std::size_t>(d));
+            ArrayXd model;
+            errors.run([&] {
+                model = get_model_for_dataset(static_cast<std::size_t>(d));
+            });
+            if (errors.failed()) continue;
 
             /* ---- χ array (ignored bins keep 0) ------------------------ */
             ArrayXd &chi = chi_arr[d];
@@ -1038,6 +1044,7 @@ void UnifiedFitWorkflow::stage6_rescale_and_reject()
             if (local_changed)
                 weights_changed = true;
         }  /* -------- end data-set loop -------------------------------- */
+        errors.rethrow();
 
         /* -------- one warm-started LM step with new weights ----------- */
         std::set<std::string> fp = { "all", "continuum" };

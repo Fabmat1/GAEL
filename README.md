@@ -237,6 +237,9 @@ Two optional `settings` keys mirror ISIS's `auto_freeze_sur_ratio`, which is
 | `Could NOT find unordered_dense`                              | Ensure the header resides in a CMake search path, e.g. `/usr/local/include/ankerl/unordered_dense.h`.   |
 | `OpenMP for C++ not found` (macOS)                            | `brew install libomp`. Apple's compiler has no OpenMP runtime of its own.                              |
 | `CUDA toolkit not found`                                      | Install CUDA **or** rebuild with `-DGAEL_ENABLE_CUDA=OFF`.                                           |
+| `Warning: model file … is missing; interpolating across it`   | The grid lists a node with no model file. The fit goes on: the missing node is linearly interpolated from its two neighbours along one axis (rule: "Holes in a grid" in `src/ModelGrid.cpp`), and the result's `grid_gaps` / `warnings` name every such file the fit used. |
+| `model file … is missing … cannot be interpolated across`     | A missing node without existing neighbours on both sides along any axis. Restore the file or keep the fit away from that corner of the grid. |
+| `cannot read model file …`                                    | The file exists but could not be read (I/O error, unreachable mount or host, corrupt file). This is never bridged; fix the storage and rerun. |
 
 ---
 
