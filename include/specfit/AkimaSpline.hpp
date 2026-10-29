@@ -56,6 +56,7 @@ private:
     using Makima = decltype(boost::math::interpolators::makima(
         std::vector<Real>(), std::vector<Real>()));
     std::shared_ptr<Makima> makima_;
+    std::vector<Real> s_;          // makima's knot slopes, read back from it
 
     std::vector<Real> x_, y_;      // knots
     std::vector<Real> b_, c_, d_;  // per-interval cubic coefficients
@@ -64,6 +65,7 @@ private:
     Real deriv_min_ = 0.0, deriv_max_ = 0.0;
 
     Real eval_interval(std::size_t i, Real x) const;
+    Real eval_makima(std::size_t i, Real x) const;
 };
 
 } // namespace specfit

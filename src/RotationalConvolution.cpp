@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cassert>
 #include <cstdint>
+#include <limits>
 
 namespace specfit {
 
@@ -507,15 +508,20 @@ Vector rotational_broaden(const Vector& lam,
 namespace {
 
 struct RotSegments {
-    std::vector<std::uint32_t> start;   // n_out : first input index of the run
-    std::vector<std::size_t>   off;     // n_out + 1 : offsets into w
+    std::ptrdiff_t             n_out = 0;
+    std::vector<std::uint32_t> start;   // first input index of each run
+    std::vector<std::size_t>   off;     // offsets into w, one past the end too
     std::vector<double>        w;       // flat weights
 
     /* ---- shift-invariant core (see compute_segments) -------------------- *
      *  When the two grids are the same log-uniform grid, every output point
      *  in [core_lo, core_hi) has the identical run of weights at the identical
-     *  offset from itself, so one copy is kept instead of n_out of them and
-     *  `w` only carries the two edges.                                      */
+     *  offset from itself, so one copy is kept instead of n_out of them, and
+     *  `start` / `off` / `w` carry only the edge points: [0, core_lo), then
+     *  [core_hi, n_out).  Keeping a start and an offset for every core point
+     *  as well was 12 bytes per point that nothing read -- 2 MB per vsini on
+     *  synthe's rotate-after grid, and with vsini free the cache filled its
+     *  whole 1.6 GB share with them.                                        */
     bool           uniform  = false;
     std::ptrdiff_t core_lo  = 0;        // first output point using `core_w`
     std::ptrdiff_t core_hi  = 0;        // one past the last
@@ -559,6 +565,38 @@ bool is_log_uniform(const Vector& lam, double& step_out)
     return true;
 }
 
+/*  is_log_uniform() takes a log per point -- ~3 ms on a 160 k-point grid,
+ *  paid on every new vsini.  The answer only depends on the grid, so it is
+ *  remembered, keyed like the weight caches (range, length, two interior
+ *  samples).                                                              */
+bool is_log_uniform_cached(const Vector& lam, double& step_out)
+{
+    struct Entry { std::ptrdiff_t n; double a, b, m1, m2; bool ok; double step; };
+    static std::vector<Entry> known;
+    static std::mutex         mtx;
+
+    const std::ptrdiff_t n = lam.size();
+    if (n < 3) return false;
+    const Entry probe{n, lam[0], lam[n - 1], lam[n / 3], lam[(2 * n) / 3],
+                      false, 0.0};
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        for (const auto& e : known)
+            if (e.n == probe.n && e.a == probe.a && e.b == probe.b &&
+                e.m1 == probe.m1 && e.m2 == probe.m2) {
+                step_out = e.step;
+                return e.ok;
+            }
+    }
+    double step = 0.0;
+    const bool ok = is_log_uniform(lam, step);
+    std::lock_guard<std::mutex> lk(mtx);
+    if (known.size() >= 64) known.erase(known.begin());
+    known.push_back({probe.n, probe.a, probe.b, probe.m1, probe.m2, ok, step});
+    step_out = step;
+    return ok;
+}
+
 RotSegments compute_segments(const Vector& lam_in,
                              const Vector& lam_out,
                              double vsini_kms,
@@ -593,6 +631,7 @@ RotSegments compute_segments(const Vector& lam_in,
     const double   lam_last  = li[M - 1];
 
     RotSegments S;
+    S.n_out = N;
     S.start.resize(static_cast<std::size_t>(N));
     S.off.resize(static_cast<std::size_t>(N) + 1);
 
@@ -602,14 +641,28 @@ RotSegments compute_segments(const Vector& lam_in,
         return std::lower_bound(li, li + M, x) - li;
     };
 
-    /* ---- pass 1: the input-index run each output point touches --------- */
-    #pragma omp parallel for schedule(static)
+    /* ---- pass 1: the input-index run each output point touches --------- *
+     *  Both window ends rise with the output wavelength, so two cursors
+     *  give the same lower_bound indices as a binary search per point, in
+     *  O(n) instead of 2 n log M -- this pass ran on every new vsini.  A
+     *  window end that steps backwards (an unsorted lam_out) falls back to
+     *  the search.                                                          */
+    std::ptrdiff_t ca = 0, cb = 0;
+    double prev_a = -std::numeric_limits<double>::infinity();
+    double prev_b = -std::numeric_limits<double>::infinity();
     for (std::ptrdiff_t i = 0; i < N; ++i) {
         const double a = std::max(lo[i] * f_lo, lam_first);
         const double b = std::min(lo[i] * f_hi, lam_last);
 
-        std::ptrdiff_t ja = lb(a); if (ja == 0) ja = 1; if (ja >= M) ja = M - 1;
-        std::ptrdiff_t jb = lb(b); if (jb == 0) jb = 1; if (jb >= M) jb = M - 1;
+        if (a < prev_a) ca = lb(a);
+        else while (ca < M && li[ca] < a) ++ca;
+        if (b < prev_b) cb = lb(b);
+        else while (cb < M && li[cb] < b) ++cb;
+        prev_a = a;
+        prev_b = b;
+
+        std::ptrdiff_t ja = ca; if (ja == 0) ja = 1; if (ja >= M) ja = M - 1;
+        std::ptrdiff_t jb = cb; if (jb == 0) jb = 1; if (jb >= M) jb = M - 1;
         if (jb < ja) jb = ja;
 
         S.start[static_cast<std::size_t>(i)] =
@@ -681,7 +734,7 @@ RotSegments compute_segments(const Vector& lam_in,
      *  runs unchanged.                                                       */
     double log_step = 0.0;
     const bool same_grid = (M == N) && (li == lo);
-    if (same_grid && is_log_uniform(lam_in, log_step)) {
+    if (same_grid && is_log_uniform_cached(lam_in, log_step)) {
         const std::ptrdiff_t mid = N / 2;
         const std::ptrdiff_t s_mid   = S.start[static_cast<std::size_t>(mid)];
         const std::size_t    len_mid = S.off[static_cast<std::size_t>(mid) + 1];
@@ -729,12 +782,33 @@ RotSegments compute_segments(const Vector& lam_in,
                    S.w.data() + base);
     }
 
+    /* ---- keep the edge points only ------------------------------------- *
+     *  Core points have empty runs, so off[core_lo] == off[core_hi] and the
+     *  edges' offsets carry over unchanged.                                 */
+    if (S.uniform) {
+        const auto lo_n = static_cast<std::size_t>(S.core_lo);
+        const auto hi_0 = static_cast<std::size_t>(S.core_hi);
+        std::vector<std::uint32_t> st;
+        std::vector<std::size_t>   of;
+        st.reserve(lo_n + (static_cast<std::size_t>(N) - hi_0));
+        of.reserve(st.capacity() + 1);
+        for (std::size_t i = 0; i < lo_n; ++i) {
+            st.push_back(S.start[i]); of.push_back(S.off[i]);
+        }
+        for (std::size_t i = hi_0; i < static_cast<std::size_t>(N); ++i) {
+            st.push_back(S.start[i]); of.push_back(S.off[i]);
+        }
+        of.push_back(S.off[static_cast<std::size_t>(N)]);
+        S.start = std::move(st);
+        S.off   = std::move(of);
+    }
+
     return S;
 }
 
 Vector apply_segments(const Vector& flux, const RotSegments& S)
 {
-    const std::ptrdiff_t N = static_cast<std::ptrdiff_t>(S.start.size());
+    const std::ptrdiff_t N = S.n_out;
     Vector out(N);
     const double* f = flux.data();
 
@@ -757,12 +831,16 @@ Vector apply_segments(const Vector& flux, const RotSegments& S)
         }
     }
 
+    /*  The rest point by point; with a core, run r is edge point
+     *  r < core_lo ? r : r - core_lo + core_hi.                            */
+    const std::ptrdiff_t n_runs = static_cast<std::ptrdiff_t>(S.start.size());
     #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t i = 0; i < N; ++i) {
-        if (S.uniform && i >= S.core_lo && i < S.core_hi) continue;
-        const std::size_t b   = S.off[static_cast<std::size_t>(i)];
-        const std::size_t e   = S.off[static_cast<std::size_t>(i) + 1];
-        const double*     fp  = f + S.start[static_cast<std::size_t>(i)];
+    for (std::ptrdiff_t r = 0; r < n_runs; ++r) {
+        const std::ptrdiff_t i =
+            (S.uniform && r >= S.core_lo) ? r - S.core_lo + S.core_hi : r;
+        const std::size_t b   = S.off[static_cast<std::size_t>(r)];
+        const std::size_t e   = S.off[static_cast<std::size_t>(r) + 1];
+        const double*     fp  = f + S.start[static_cast<std::size_t>(r)];
         const double*     wp  = S.w.data() + b;
         double sum = 0.0;
         #pragma omp simd reduction(+:sum)
@@ -817,6 +895,9 @@ std::condition_variable g_segInflightCv;
  *
  *  Was a hard-coded 256 MiB, which is below half of any share this returns on
  *  a machine that can run the fit at all, so this only ever lifts it.       */
+/*  Two Jacobians' worth of vsini values, per fit in flight.               */
+constexpr std::size_t kSegEntriesPerFit = 16;
+
 std::size_t seg_max_bytes()
 {
     return MemoryBudget::instance().rotational_weights() / 2;
@@ -910,8 +991,16 @@ Vector rotational_broaden(const Vector& lam_in,
              *  entry those two evict each other and each gets rebuilt from
              *  scratch.  That costs nothing on the shift-invariant path (the
              *  tables are ~10 MB there) and is the difference between a cache
-             *  and a treadmill on an input grid that is not log-uniform.    */
-            while (g_segCache.size() > 2 && g_segBytes > seg_max_bytes()) {
+             *  and a treadmill on an input grid that is not log-uniform.
+             *
+             *  Entries are capped in number too.  With vsini free nearly
+             *  every LM step mints a key that is used for a handful of
+             *  evaluations and never again; the byte budget alone let those
+             *  pile up to the whole share.                                  */
+            const std::size_t max_n =
+                MemoryBudget::instance().entry_cap(kSegEntriesPerFit);
+            while (g_segCache.size() > 2 &&
+                   (g_segBytes > seg_max_bytes() || g_segCache.size() > max_n)) {
                 const SegKey victim = g_segLru.back();
                 if (auto it = g_segCache.find(victim); it != g_segCache.end()) {
                     g_segBytes -= std::min(g_segBytes, it->second.second);

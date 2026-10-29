@@ -107,3 +107,7 @@ set_tests_properties(fits_concurrency PROPERTIES TIMEOUT 300 LABELS "unit")
 # Measurement tool, not a test: accuracy of the metal-free model pipeline.
 add_executable(bench_hhe_order bench_hhe_order.cpp)
 target_link_libraries(bench_hhe_order PRIVATE GAELcore)
+
+# Measurement tool: dump model spectra to compare two builds bit for bit.
+add_executable(dump_models dump_models.cpp)
+target_link_libraries(dump_models PRIVATE GAELcore)

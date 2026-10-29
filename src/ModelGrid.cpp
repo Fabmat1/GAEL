@@ -517,46 +517,223 @@ bool near_log_uniform(const Vector& lam)
     return hi <= 2.5 * lo;
 }
 
-/*  The log-uniform grid the rotate-after path degrades every corner onto:
+/*  A small memo of things built per (native slice, spectrograph): the
+ *  slice changes with every fit's window, so a long mass fit would grow an
+ *  unbounded list.  Entries are handed out as shared_ptr, so dropping the
+ *  oldest never pulls one from under a caller.                            */
+template <typename T>
+class SliceMemo {
+public:
+    struct Key {
+        Eigen::Index n; double lo, hi, mid, ro, rs;
+        bool operator==(const Key&) const = default;
+    };
+    static Key key(const Vector& lam, double ro, double rs)
+    {
+        const Eigen::Index n = lam.size();
+        return {n, lam[0], lam[n - 1], lam[n / 3], ro, rs};
+    }
+    template <typename Build>
+    std::shared_ptr<const T> get(const Key& k, Build&& build)
+    {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            for (const auto& [ek, ev] : items_) if (ek == k) return ev;
+        }
+        auto v = std::make_shared<const T>(build());
+        std::lock_guard<std::mutex> lk(mtx_);
+        for (const auto& [ek, ev] : items_) if (ek == k) return ev;
+        if (items_.size() >= kMax) items_.pop_front();
+        items_.emplace_back(k, v);
+        return v;
+    }
+private:
+    static constexpr std::size_t kMax = 64;
+    std::mutex mtx_;
+    std::deque<std::pair<Key, std::shared_ptr<const T>>> items_;
+};
+
+/*  The log-uniform grid the rotate-after path degrades every corner onto
+ *  when the native grid is not a lattice (see LatticePlan):
  *  hhe_oversample() points per resolution element at the highest R in the
  *  range, but never more points than the native grid has -- at R = 7500 and
  *  above, synthe's own 1 km/s already is that fine, and going finer would
  *  only make every model evaluation slower.  Same endpoints as the native
- *  grid, exact, so the convolutions see the same range.
- *
- *  Memoised like conv_grid() in SyntheticModel.cpp, and a deque for the same
- *  reason: callers keep the reference while other fits append.             */
-const Vector& hhe_conv_grid(const Vector& lam, double resOffset, double resSlope)
+ *  grid, exact, so the convolutions see the same range.                    */
+std::shared_ptr<const Vector>
+hhe_conv_grid(const Vector& lam, double resOffset, double resSlope)
 {
-    struct Entry { double lo, hi; Eigen::Index n_in; double ro, rs; Vector g; };
-    static std::deque<Entry> cache;
-    static std::mutex        mtx;
+    static SliceMemo<Vector> memo;
+    return memo.get(SliceMemo<Vector>::key(lam, resOffset, resSlope), [&] {
+        const Eigen::Index n_in = lam.size();
+        const double lo = lam[0];
+        const double hi = lam[n_in - 1];
 
-    const Eigen::Index n_in = lam.size();
-    const double lo = lam[0];
-    const double hi = lam[n_in - 1];
+        const double R    = std::max(resOffset + resSlope * lo,
+                                     resOffset + resSlope * hi);
+        const double span = std::log(hi / lo);
+        const double want = std::ceil(span * hhe_oversample() * R) + 1.0;
+        const Eigen::Index n = (want >= 2.0 && want < double(n_in))
+                             ? static_cast<Eigen::Index>(want) : n_in;
 
-    std::lock_guard<std::mutex> lk(mtx);
-    for (const auto& e : cache)
-        if (e.lo == lo && e.hi == hi && e.n_in == n_in &&
-            e.ro == resOffset && e.rs == resSlope)
-            return e.g;
+        Vector g(n);
+        const double step = span / static_cast<double>(n - 1);
+        for (Eigen::Index i = 0; i < n; ++i)
+            g[i] = lo * std::exp(static_cast<double>(i) * step);
+        g[0]     = lo;
+        g[n - 1] = hi;
+        return g;
+    });
+}
 
-    const double R    = std::max(resOffset + resSlope * lo,
-                                 resOffset + resSlope * hi);
-    const double span = std::log(hi / lo);
-    const double want = std::ceil(span * hhe_oversample() * R) + 1.0;
-    const Eigen::Index n = (want >= 2.0 && want < double(n_in))
-                         ? static_cast<Eigen::Index>(want) : n_in;
+/* ------------------------------------------------------------------ *
+ *  The instrumental profile on a wavelength lattice, without a table.
+ *
+ *  Synthe's wavelengths are a lattice: every point is lambda_0 *
+ *  exp(m h0) for an integer m, h0 = ln(1 + 1/500000) (0.6 km/s), and
+ *  consecutive points are one or two steps apart.  With R constant the
+ *  instrumental routine's weight (Resolution.cpp, compute_weights)
+ *
+ *      exp(-(lambda_j - lambda_i)^2 / 2 sigma_i^2) * dLam_j,
+ *      sigma_i = lambda_i / R * SIGMA_FROM_FWHM,  |lambda_j - lambda_i| <= 5 sigma_i,
+ *
+ *  depends on i and j only through k = m_j - m_i, since
+ *  (lambda_j - lambda_i) / sigma_i = (exp(k h0) - 1) R / SIGMA_FROM_FWHM.
+ *  So when the output points are lattice points too, the normalised sum
+ *  is a ratio of two convolutions with one fixed kernel G_k:
+ *
+ *      out_i = sum_k G_k F[m_i + k] / sum_k G_k W[m_i + k],
+ *      F[m_j] = f_j dLam_j,  W[m_j] = dLam_j,  both zero off the native points.
+ *
+ *  Same terms, same 5-sigma cut, same normalisation; the only difference
+ *  is that the kernel is evaluated at exact lattice offsets rather than at
+ *  the stored wavelengths, which sit within 5e-4 of a step of the lattice.
+ *  The table it replaces was ~0.9 GB per fit window at R = 1800 -- a mass
+ *  fit's windows all differ, so six fits thrashed the cache rebuilding them
+ *  and spent ~45 % of their time on it.  The denominator does not depend on
+ *  the flux and is computed once per plan.
+ *
+ *  Output points every q lattice steps, q chosen for hhe_oversample() per
+ *  resolution element (R = 1800: q = 3, 1.8 km/s, 93 per R), never more
+ *  points than the native grid has.  Only for R constant and a grid that is
+ *  a lattice; anything else takes hhe_conv_grid() and the tables.
+ * ------------------------------------------------------------------ */
+struct LatticePlan {
+    double ln0 = 0.0;                 // ln lambda at lattice index 0
+    double h0  = 0.0;                 // lattice step in ln lambda
+    std::vector<std::int32_t> m;      // lattice index of each native point
+    std::vector<double>       dlam;   // compute_weights' quadrature weights
+    std::int32_t m_last = 0;
+    std::int32_t q      = 1;          // output stride, in lattice steps
+    Vector       L;                   // output grid: indices 0, q, 2q, ...
+    std::int32_t kmin = 0, kmax = 0;
+    std::vector<double> G;            // G[k - kmin]
+    Vector       norm;                // sum_k G_k W[i q + k]
 
-    Vector g(n);
-    const double step = span / static_cast<double>(n - 1);
-    for (Eigen::Index i = 0; i < n; ++i)
-        g[i] = lo * std::exp(static_cast<double>(i) * step);
-    g[0]     = lo;
-    g[n - 1] = hi;
-    cache.push_back({lo, hi, n_in, resOffset, resSlope, std::move(g)});
-    return cache.back().g;
+    /*  sum_k G_k X[base + k] over the part of the kernel inside the lattice. */
+    double conv(const double* X, std::int32_t base) const
+    {
+        const std::int32_t lo = std::max(kmin, -base);
+        const std::int32_t hi = std::min(kmax, m_last - base);
+        const double* x = X + base + lo;
+        const double* g = G.data() + (lo - kmin);
+        double sum = 0.0;
+        #pragma omp simd reduction(+:sum)
+        for (std::int32_t k = 0; k <= hi - lo; ++k) sum += g[k] * x[k];
+        return sum;
+    }
+
+    Vector degrade(const Vector& flux) const
+    {
+        std::vector<double> F(static_cast<std::size_t>(m_last) + 1, 0.0);
+        for (std::size_t j = 0; j < m.size(); ++j)
+            F[static_cast<std::size_t>(m[j])] = flux[Eigen::Index(j)] * dlam[j];
+        Vector out(L.size());
+        #pragma omp parallel for schedule(static)
+        for (Eigen::Index i = 0; i < L.size(); ++i)
+            out[i] = conv(F.data(), static_cast<std::int32_t>(i) * q) / norm[i];
+        return out;
+    }
+};
+
+/*  Must match Resolution.cpp's compute_weights.                            */
+constexpr double kSigmaFromFwhm = 0.42466090014400953;
+constexpr double kKernelRadius  = 5.0;
+
+std::shared_ptr<const LatticePlan>
+lattice_plan(const Vector& lam, double resOffset, double resSlope)
+{
+    if (resSlope != 0.0 || !(resOffset > 0.0) || lam.size() < 3) return nullptr;
+
+    static SliceMemo<std::optional<LatticePlan>> memo;
+    auto plan = memo.get(SliceMemo<std::optional<LatticePlan>>::key(
+                             lam, resOffset, resSlope),
+                         [&]() -> std::optional<LatticePlan> {
+        const Eigen::Index n = lam.size();
+        LatticePlan P;
+        P.ln0 = std::log(lam[0]);
+
+        /*  The smallest step is one lattice step; refine it over the whole
+         *  span, then require every point to sit on the lattice.          */
+        double hmin = std::numeric_limits<double>::infinity();
+        for (Eigen::Index j = 1; j < n; ++j) {
+            if (!(lam[j] > lam[j - 1])) return std::nullopt;
+            hmin = std::min(hmin, std::log(lam[j] / lam[j - 1]));
+        }
+        const double span = std::log(lam[n - 1]) - P.ln0;
+        const double steps = std::round(span / hmin);
+        if (!(steps >= 1.0) || steps > 4.0 * double(n)) return std::nullopt;
+        P.h0     = span / steps;
+        P.m_last = static_cast<std::int32_t>(steps);
+        P.m.resize(static_cast<std::size_t>(n));
+        for (Eigen::Index j = 0; j < n; ++j) {
+            const double x = (std::log(lam[j]) - P.ln0) / P.h0;
+            const double r = std::round(x);
+            if (std::abs(x - r) > 0.05) return std::nullopt;
+            P.m[std::size_t(j)] = static_cast<std::int32_t>(r);
+            if (j > 0 && P.m[std::size_t(j)] <= P.m[std::size_t(j - 1)])
+                return std::nullopt;
+        }
+
+        /*  compute_weights' dLam, on the stored wavelengths. */
+        P.dlam.resize(static_cast<std::size_t>(n));
+        P.dlam[0]                     = lam[1] - lam[0];
+        P.dlam[std::size_t(n - 1)]    = lam[n - 1] - lam[n - 2];
+        for (Eigen::Index j = 1; j < n - 1; ++j)
+            P.dlam[std::size_t(j)] = 0.5 * (lam[j + 1] - lam[j - 1]);
+
+        /*  Output stride: hhe_oversample() per R, never more points than
+         *  the native grid has.                                           */
+        const double want = 1.0 / (hhe_oversample() * resOffset * P.h0);
+        P.q = std::max<std::int32_t>(1, static_cast<std::int32_t>(std::lround(want)));
+        while (P.m_last / P.q + 1 > 2 * n) ++P.q;
+        const Eigen::Index nL = P.m_last / P.q + 1;
+        P.L.resize(nL);
+        for (Eigen::Index i = 0; i < nL; ++i)
+            P.L[i] = std::exp(P.ln0 + double(i) * P.q * P.h0);
+
+        /*  The kernel, out to the 5-sigma cut: |exp(k h0) - 1| <= c.      */
+        const double c = kKernelRadius * kSigmaFromFwhm / resOffset;
+        if (!(c < 1.0)) return std::nullopt;
+        P.kmin = static_cast<std::int32_t>(std::ceil(std::log1p(-c) / P.h0));
+        P.kmax = static_cast<std::int32_t>(std::floor(std::log1p(c) / P.h0));
+        P.G.resize(static_cast<std::size_t>(P.kmax - P.kmin + 1));
+        for (std::int32_t k = P.kmin; k <= P.kmax; ++k) {
+            const double t = std::expm1(k * P.h0) * resOffset / kSigmaFromFwhm;
+            P.G[std::size_t(k - P.kmin)] = std::exp(-0.5 * t * t);
+        }
+
+        std::vector<double> W(static_cast<std::size_t>(P.m_last) + 1, 0.0);
+        for (std::size_t j = 0; j < P.m.size(); ++j)
+            W[static_cast<std::size_t>(P.m[j])] = P.dlam[j];
+        P.norm.resize(nL);
+        for (Eigen::Index i = 0; i < nL; ++i)
+            P.norm[i] = P.conv(W.data(), static_cast<std::int32_t>(i) * P.q);
+        return P;
+    });
+    if (!*plan) return nullptr;
+    /*  Aliasing constructor: shares ownership with the memo entry.        */
+    return std::shared_ptr<const LatticePlan>(plan, &**plan);
 }
 
 /*  Kernel taps for rotating on a log-uniform grid: at least four per grid
@@ -864,15 +1041,22 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
 
                              if (rotate_after) {
                                  /*  Degraded, not rotated, on the coarse
-                                  *  grid.  The continuum is never broadened
-                                  *  (see below).                         */
-                                 const Vector& lc = hhe_conv_grid(
-                                     raw.lambda, resOffset, resSlope);
+                                  *  grid: the lattice one when the native
+                                  *  grid is a lattice, else hhe_conv_grid.
+                                  *  The continuum is never broadened. */
                                  Spectrum result;
-                                 result.lambda = lc;
-                                 result.flux   = degrade_resolution(
-                                     raw.lambda, raw.flux, lc,
-                                     resOffset, resSlope);
+                                 if (auto lp = lattice_plan(raw.lambda,
+                                                            resOffset,
+                                                            resSlope)) {
+                                     result.lambda = lp->L;
+                                     result.flux   = lp->degrade(raw.flux);
+                                 } else {
+                                     result.lambda = *hhe_conv_grid(
+                                         raw.lambda, resOffset, resSlope);
+                                     result.flux   = degrade_resolution(
+                                         raw.lambda, raw.flux, result.lambda,
+                                         resOffset, resSlope);
+                                 }
                                  /*  The continuum stays on the native
                                   *  grid, exactly as the per-corner path
                                   *  keeps it (see Spectrum::cont_lambda). */

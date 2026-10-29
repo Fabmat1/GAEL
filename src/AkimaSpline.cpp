@@ -46,6 +46,11 @@ AkimaSpline::AkimaSpline(const Vector& x, const Vector& y)
         y_max_ = (*makima_)(x_max_);
         deriv_min_ = ((*makima_)(x_min_ + h) - y_min_) / h;
         deriv_max_ = (y_max_ - (*makima_)(x_max_ - h)) / h;
+        /*  boost keeps its slopes private, but prime() at a knot is
+         *  s0 + 2*c2*0 + 3*c3*0*0 -- the stored slope exactly -- and at
+         *  the last knot it returns the last slope outright.            */
+        s_.resize(n);
+        for (std::size_t k = 0; k < n; ++k) s_[k] = makima_->prime(x_[k]);
         return;
     }
 
@@ -128,6 +133,26 @@ Real AkimaSpline::eval_interval(std::size_t i, Real x) const
     return y_[i] + dx * (b_[i] + dx * (c_[i] + d_[i] * dx));
 }
 
+/*  boost's cubic_hermite_detail::operator(), term for term, on the
+ *  interval [x_i, x_{i+1}] -- so that the vector path below can find the
+ *  interval with a cursor instead of boost's range check and binary search
+ *  per pixel (a quarter of an sdB fit) and still give the same numbers.   */
+Real AkimaSpline::eval_makima(std::size_t i, Real x) const
+{
+    if (x == x_.back()) return y_.back();
+    Real x0 = x_[i];
+    Real x1 = x_[i + 1];
+    Real y0 = y_[i];
+    Real y1 = y_[i + 1];
+    Real s0 = s_[i];
+    Real s1 = s_[i + 1];
+    Real dx = (x1 - x0);
+    Real t = (x - x0) / dx;
+    Real y = (1 - t) * (1 - t) * (y0 * (1 + 2 * t) + s0 * (x - x0))
+           + t * t * (y1 * (3 - 2 * t) + dx * s1 * (t - 1));
+    return y;
+}
+
 Real AkimaSpline::operator()(Real x) const
 {
     if (x_.size() == 1)   return y_min_;
@@ -148,7 +173,22 @@ Vector AkimaSpline::operator()(const Vector& x) const
     Vector out(x.size());
     if (x_.size() == 1) { out.setConstant(y_min_); return out; }
     if (makima_) {
-        for (Eigen::Index k = 0; k < x.size(); ++k) out[k] = (*this)(x[k]);
+        /*  Same merged scan as below.  boost's interval for x is the last
+         *  knot <= x (upper_bound - 1), which is what the cursor finds;
+         *  anything off the monotone in-range path goes through boost.  */
+        const std::size_t n = x_.size();
+        std::size_t i = 0;
+        Real prev = -std::numeric_limits<Real>::infinity();
+        for (Eigen::Index k = 0; k < x.size(); ++k) {
+            const Real xv = x[k];
+            if (xv < prev || xv < x_min_ || xv > x_max_) {
+                out[k] = (*this)(xv);
+                continue;
+            }
+            prev = xv;
+            while (i + 2 < n && x_[i + 1] <= xv) ++i;
+            out[k] = eval_makima(i, xv);
+        }
         return out;
     }
 
