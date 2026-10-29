@@ -523,8 +523,10 @@ FitResult GaelSession::run_impl()
     }
 
     SharedModel model;
-    for (const auto& c : comps)
+    for (const auto& c : comps) {
         model.grids.emplace_back(gs.base_paths, c.grid_relative_path);
+        model.grids.back().set_vsini_free(!c.freeze_vsini);
+    }
 
     model.params.resize(comps.size());
     std::vector<std::map<std::string,bool>> frozen(comps.size());

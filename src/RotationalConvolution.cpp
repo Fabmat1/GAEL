@@ -359,14 +359,29 @@ static RotationalWeights compute_weights(const Vector& lam,
     
     const double c_km = 299792.458;  // Speed of light in km/s
     
-    // Precompute interpolation weights for each output wavelength
-    #pragma omp parallel for schedule(dynamic, 32)
+    /*  Built afresh for every new vsini, which with vsini free is every
+     *  LM step: on an sdB fit that was half of all the time.  Two things
+     *  here are cheaper than they were and change nothing.  The scratch
+     *  vectors are one pair per thread instead of two allocations per
+     *  point.  And a point's taps sit at lam_i * (1 + v_k / c), which never
+     *  decreases with k, so the lower_bound for each tap is found by walking
+     *  forward from the previous one instead of a binary search per tap --
+     *  the same index, so the same entries in the same order go into the
+     *  sort below, which therefore leaves them in the same order too.    */
+    #pragma omp parallel
+    {
+    std::vector<RotationalWeights::WeightEntry> point_weights;
+    std::vector<RotationalWeights::WeightEntry> consolidated;
+    point_weights.reserve(static_cast<std::size_t>(n_kernel) * 2);
+    consolidated.reserve(static_cast<std::size_t>(n_kernel) * 2);
+
+    #pragma omp for schedule(dynamic, 32)
     for (std::ptrdiff_t i = 0; i < N; ++i) {
         double lam_center = lam[i];
-        std::vector<RotationalWeights::WeightEntry> point_weights;
-        point_weights.reserve(n_kernel * 2);  // Estimate
+        point_weights.clear();
         
         double sum_weight = 0.0;
+        std::ptrdiff_t cur = -1;              // lower_bound of the last tap
         
         // For each kernel point
         for (int k = 0; k < n_kernel; ++k) {
@@ -375,9 +390,12 @@ static RotationalWeights compute_weights(const Vector& lam,
             
             // Find where lam_k falls in the wavelength grid
             if (lam_k >= lam[0] && lam_k <= lam[N-1]) {
-                // Binary search for interpolation position
-                auto it = std::lower_bound(lam.begin(), lam.end(), lam_k);
-                std::ptrdiff_t j = std::distance(lam.begin(), it);
+                if (cur < 0)
+                    cur = std::distance(lam.begin(),
+                              std::lower_bound(lam.begin(), lam.end(), lam_k));
+                else
+                    while (cur < N && lam[cur] < lam_k) ++cur;
+                std::ptrdiff_t j = cur;
                 
                 if (j == 0) j = 1;
                 if (j >= N) j = N - 1;
@@ -413,7 +431,7 @@ static RotationalWeights compute_weights(const Vector& lam,
         std::sort(point_weights.begin(), point_weights.end(), 
                  [](const auto& a, const auto& b) { return a.idx < b.idx; });
         
-        std::vector<RotationalWeights::WeightEntry> consolidated;
+        consolidated.clear();
         /*  At most one entry per tap, and never more.  Without this the
          *  vector grows from empty by doubling and lands on the next power of
          *  two above the tap count -- 256 slots for ~162 taps.  That slack is
@@ -424,7 +442,6 @@ static RotationalWeights compute_weights(const Vector& lam,
          *  works, because a Jacobian column wants the table at vsini and at
          *  vsini+h and would otherwise evict one to build the other on every
          *  column.                                                          */
-        consolidated.reserve(point_weights.size());
         for (const auto& w : point_weights) {
             if (!consolidated.empty() && consolidated.back().idx == w.idx) {
                 consolidated.back().weight += w.weight;
@@ -437,11 +454,12 @@ static RotationalWeights compute_weights(const Vector& lam,
          *  vector's capacity is its size: `consolidated` still carries the
          *  slack between the tap count and how many survived consolidation,
          *  which at low vsini (where most taps merge) is most of it.  Copying
-         *  a few hundred pairs is nothing against the binary search per tap
-         *  that produced them.                                              */
+         *  a few hundred pairs is nothing against the taps and the sort that
+         *  produced them.                                                   */
         weights.weights_per_point[i].assign(consolidated.begin(),
                                             consolidated.end());
     }
+    }   // omp parallel
     
     return weights;
 }

@@ -134,7 +134,19 @@ public:
 
     void set_wavelength_window(double lambda_min, double lambda_max);
 
-    /*  Hash of the active window; 0 when the whole grid is in use. */
+    /*  Whether the fit this grid serves leaves vsini free.  On grids that
+     *  are not near log-uniform (sdB, BHB, Feros, ...) that selects how a
+     *  metal-free model is built -- see load_spectrum: with vsini free the
+     *  raw corners are interpolated first and the result is rotated and
+     *  degraded once, rather than every corner at every new vsini.  Set it
+     *  before the first model is built; the default keeps the per-corner
+     *  path, which is what a vsini-frozen fit wants.                     */
+    void set_vsini_free(bool free);
+
+    /*  Hash of the active window and of the way models are built (see
+     *  set_vsini_free); 0 for the whole grid built per corner.  Every model
+     *  cache keys on it, so fits that build their models differently never
+     *  serve each other's spectra.                                        */
     std::size_t window_key() const { return window_key_; }
 
     struct ParameterBounds {
@@ -261,6 +273,8 @@ private:
     double      window_lo_  = -std::numeric_limits<double>::infinity();
     double      window_hi_  =  std::numeric_limits<double>::infinity();
     std::size_t window_key_ = 0;
+    bool        vsini_free_ = false;
+    void        update_window_key();
 
     /*  Whether this grid's metal-free models may be rotated after the corner
      *  interpolation rather than per corner; see load_spectrum.            */

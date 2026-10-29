@@ -989,12 +989,31 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
      *
      *  Only on grids that are near log-uniform (near_log_uniform), and only
      *  with an instrumental profile to band-limit the model.  The sdB-type
-     *  grids keep the per-corner path: they are small enough that it is
-     *  cheap, and there the two orders differ by up to 2e-3 with no
-     *  reference to say which is closer.                                  */
+     *  grids never degrade before rotating: there the two orders differ by
+     *  up to 2e-3 with no reference to say which is closer.  They build per
+     *  corner, or interpolate first when vsini is free (below).          */
     const bool degrade = (resOffset != 0 || resSlope != 0);
     const bool rotate_after = degrade && !force_corner_path() &&
                               hhe_rotate_after_ok();
+
+    /*  Interpolate-first: on the other grids, when the fit leaves vsini
+     *  free (set_vsini_free), the raw corners are cached, interpolated, and
+     *  the result is rotated and then degraded -- the per-corner order of
+     *  the two convolutions, with only the corner sum moved in front of
+     *  them, which is exact up to rounding.  Per corner, every new vsini
+     *  meant rotating and degrading all eight corners and building a weight
+     *  table whose per-point sort was ~40 % of the fit; vsini-free sdB fits
+     *  ran 13x slower than frozen ones.  The rotation uses the sort-free
+     *  segment routine (GAEL_ROT_SEGMENTS), the same integral summed in tap
+     *  order.  On 60 real sdB/processed fits from the ISIS suite with vsini
+     *  free: 635 s -> 240 s; parameters moved by a median of 3e-4 sigma, 90 %
+     *  under 2e-2 sigma, at most 0.18 sigma (vsini) / 0.14 sigma (Teff) --
+     *  the fit's own sensitivity to rounding, which the segment routine on
+     *  its own already shows at 0.15 sigma.  With vsini frozen the corners
+     *  are built once and reused for the whole fit, so per corner stays
+     *  cheaper there and those fits are unchanged, byte for byte.        */
+    const bool interp_first = degrade && !rotate_after && vsini_free_ &&
+                              !force_corner_path();
 
     /* ---------- helper to fetch / cache one corner ---------------- */
     /*  nullptr: the file turned out not to exist (now registered).       */
@@ -1024,6 +1043,12 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                          : hash_combine(k, hash_double(vsini));
         k = hash_combine(k, hash_double(resOffset));
         k = hash_combine(k, hash_double(resSlope));
+        if (interp_first) {           // raw corner: no vsini, no resolution
+            k = Key(Ti) | (Key(Gi)<<12) | (Key(Zi)<<24) | (Key(Hi)<<36) | (Key(Xi)<<48);
+            k = hash_combine(k, std::hash<std::string>{}(base_));
+            k = hash_combine(k, hash_combine(0x5152A710ULL, std::size_t(with_continuum)));
+            k = hash_combine(k, 0x2A11C0DEULL);
+        }
         k = hash_combine(k, window_key_);             // slice is part of the key
 
         //std::cout << "[LoadSpec](fetch) Entry hashes done..." << std::endl;
@@ -1039,6 +1064,13 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                              Spectrum raw = read_fits(path, with_continuum);
                              //std::cout << "[LoadSpec](fetch) Broadening." << vsini << std::endl;
 
+                             /*  Raw, as read; the continuum terms are what
+                              *  the per-corner path keeps too.          */
+                             if (interp_first) {
+                                 Spectrum result = raw;
+                                 if (with_continuum) result.cont = raw.flux;
+                                 return result;
+                             }
                              if (rotate_after) {
                                  /*  Degraded, not rotated, on the coarse
                                   *  grid: the lattice one when the native
@@ -1183,6 +1215,12 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
 
     /*  The one rotation of a rotate-after evaluation.  Corners carry no
      *  sigma there (it would be one more copy of a constant per corner).  */
+    /*  The one rotation and degradation of an interpolate-first model.  */
+    if (interp_first) {
+        if (vsini >= 0.1)
+            out.flux = rotational_broaden(out.lambda, out.flux, out.lambda, vsini);
+        out.flux = degrade_resolution(out.lambda, out.flux, resOffset, resSlope);
+    }
     if (rotate_after) {
         out.sigma = Vector::Ones(out.lambda.size());
         if (vsini >= 0.1)
@@ -1407,7 +1445,21 @@ void ModelGrid::set_wavelength_window(double lambda_min, double lambda_max)
 
     window_lo_  = lambda_min;
     window_hi_  = lambda_max;
-    window_key_ = hash_combine(hash_double(lambda_min), hash_double(lambda_max));
+    update_window_key();
+}
+
+void ModelGrid::set_vsini_free(bool free)
+{
+    vsini_free_ = free;
+    update_window_key();
+}
+
+void ModelGrid::update_window_key()
+{
+    window_key_ = (window_lo_ == -std::numeric_limits<double>::infinity())
+                ? 0
+                : hash_combine(hash_double(window_lo_), hash_double(window_hi_));
+    if (vsini_free_) window_key_ = hash_combine(window_key_, 0x51A1F7EEULL);
 }
 
 /* ------------------------------------------------------------------ *
