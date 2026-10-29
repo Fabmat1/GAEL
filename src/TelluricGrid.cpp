@@ -1,4 +1,5 @@
 #include "specfit/TelluricGrid.hpp"
+#include "specfit/FitsLock.hpp"
 #include "specfit/GridDataProvider.hpp"
 #include "specfit/Rebin.hpp"
 #include "specfit/Resolution.hpp"
@@ -189,9 +190,10 @@ SpectrumPtr TelluricGrid::corner(int a10, int w100,
         {
             std::lock_guard<std::mutex> lk(lam_mtx);
             if (lam_air.size() == 0) {
-                CCfits::FITS f(localize_grid_path(
-                                   corner_path(airmass_nodes()[0], pwv_nodes()[0])),
-                               CCfits::Read);
+                const std::string local = localize_grid_path(
+                    corner_path(airmass_nodes()[0], pwv_nodes()[0]));
+                const auto fits_lock = lock_fits_file(local);
+                CCfits::FITS f(local, CCfits::Read);
                 CCfits::ExtHDU& e = f.extension(1);
                 std::vector<Real> um;
                 e.column("lam").read(um, 1, e.rows());
@@ -205,7 +207,9 @@ SpectrumPtr TelluricGrid::corner(int a10, int w100,
 
         std::vector<Real> tr;
         {
-            CCfits::FITS f(localize_grid_path(corner_path(a10, w100)), CCfits::Read);
+            const std::string local = localize_grid_path(corner_path(a10, w100));
+            const auto fits_lock = lock_fits_file(local);
+            CCfits::FITS f(local, CCfits::Read);
             CCfits::ExtHDU& e = f.extension(1);
             e.column("trans").read(tr, 1, e.rows());
         }

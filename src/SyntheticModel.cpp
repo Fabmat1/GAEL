@@ -390,10 +390,12 @@ SpectrumPtr compute_synthetic_cached(const ModelGrid&    grid,
                 .insert_if_absent(surf_key, [&]{
                     const std::vector<int> metals = active_species(grid, pars);
                     if (metals.empty()) {
-                        /*  The ordinary path, unchanged: each hypercube corner
-                         *  is cached *already broadened*, which is sound
-                         *  because convolution and the corner interpolation
-                         *  are both linear and so commute.                  */
+                        /*  The ordinary path.  Convolution and the corner
+                         *  interpolation are both linear and so commute,
+                         *  which lets load_spectrum cache corners already
+                         *  convolved -- rotated per corner, or (on synthe-
+                         *  like grids) only degraded, with the rotation
+                         *  applied once afterwards; see load_spectrum.     */
                         return grid.load_spectrum(pars.teff, pars.logg,
                                                    pars.z,   pars.he,
                                                    pars.xi,  pars.vsini,

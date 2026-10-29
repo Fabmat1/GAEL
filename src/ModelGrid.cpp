@@ -3,6 +3,8 @@
 #include "specfit/Resolution.hpp"
 #include "specfit/RotationalConvolution.hpp"  // Added include
 #include "specfit/SpectrumCache.hpp"
+#include "specfit/ContinuumUtils.hpp"
+#include "specfit/FitsLock.hpp"
 
 #include <CCfits/CCfits>
 #include <filesystem>
@@ -15,6 +17,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <deque>
+#include <map>
 #include <array>
 #include <atomic>
 #include <functional>
@@ -80,7 +84,9 @@ ModelGrid::ModelGrid(const std::vector<std::string>& bases,
 : base_(resolve_grid(bases, rel_path)),
   gap_log_(std::make_shared<GapLog>())
 {
-    CCfits::FITS f(localize_grid_path(base_ + "/grid.fits"), CCfits::Read);
+    const std::string local = localize_grid_path(base_ + "/grid.fits");
+    const auto fits_lock = lock_fits_file(local);
+    CCfits::FITS f(local, CCfits::Read);
     CCfits::ExtHDU& ext = f.extension(1);
     for (const auto& [name, col] : ext.column()) {
         std::vector<Real> buf;
@@ -431,7 +437,9 @@ void read_corner_file(const std::string& path, Read&& read)
 {
     std::string why;
     try {
-        CCfits::FITS f(localize_grid_path(path), CCfits::Read);
+        const std::string local = localize_grid_path(path);
+        const auto fits_lock = lock_fits_file(local);
+        CCfits::FITS f(local, CCfits::Read);
         read(f.extension(1));
         return;
     }
@@ -446,7 +454,7 @@ void read_corner_file(const std::string& path, Read&& read)
  *  a mutex member would make ModelGrid non-movable.                        */
 std::mutex g_lambda_mtx;
 
-/*  Which rotational routine the metal-free path uses; see the call site.
+/*  Which rotational routine the per-corner path uses; see the call site.
  *
  *  Off by default: the segment routine computes the same integral but sums
  *  the duplicate kernel taps in a different order, so it does not reproduce
@@ -462,6 +470,106 @@ bool use_rot_segments()
         return e && std::string(e) == "1";
     }();
     return v;
+}
+
+/*  GAEL_HHE_PATH=corner sends every grid down the per-corner path, for
+ *  comparing the two on the grids that would otherwise take the other one.  */
+bool force_corner_path()
+{
+    static const bool v = [] {
+        const char* e = std::getenv("GAEL_HHE_PATH");
+        return e && std::string(e) == "corner";
+    }();
+    return v;
+}
+
+/*  Samples per resolution element of the grid the rotate-after path works
+ *  on; see load_spectrum for the measurements behind 96.  GAEL_HHE_NYQ
+ *  overrides.                                                              */
+double hhe_oversample()
+{
+    static const double v = [] {
+        const char* e = std::getenv("GAEL_HHE_NYQ");
+        if (!e || !*e) return 96.0;
+        const double x = std::atof(e);
+        return (x >= 1.0) ? x : 96.0;
+    }();
+    return v;
+}
+
+/*  Every step in ln(lambda) within a factor 2.5 of every other.  Synthe's
+ *  grids alternate 0.6 and 1.2 km/s and pass; the sdB, Feros and BHB grids
+ *  run from 0.5 km/s in line cores to 580 km/s in the continuum and do not.
+ *  On those a uniform grid with as many points would undersample the lines,
+ *  and a 17 km/s instrumental profile evaluated between two continuum points
+ *  580 km/s apart has no input to average at all.                          */
+bool near_log_uniform(const Vector& lam)
+{
+    const Eigen::Index n = lam.size();
+    if (n < 3 || !(lam[0] > 0.0)) return false;
+    double lo = std::numeric_limits<double>::infinity(), hi = 0.0;
+    for (Eigen::Index i = 1; i < n; ++i) {
+        if (!(lam[i] > lam[i - 1])) return false;
+        const double d = std::log(lam[i] / lam[i - 1]);
+        lo = std::min(lo, d);
+        hi = std::max(hi, d);
+    }
+    return hi <= 2.5 * lo;
+}
+
+/*  The log-uniform grid the rotate-after path degrades every corner onto:
+ *  hhe_oversample() points per resolution element at the highest R in the
+ *  range, but never more points than the native grid has -- at R = 7500 and
+ *  above, synthe's own 1 km/s already is that fine, and going finer would
+ *  only make every model evaluation slower.  Same endpoints as the native
+ *  grid, exact, so the convolutions see the same range.
+ *
+ *  Memoised like conv_grid() in SyntheticModel.cpp, and a deque for the same
+ *  reason: callers keep the reference while other fits append.             */
+const Vector& hhe_conv_grid(const Vector& lam, double resOffset, double resSlope)
+{
+    struct Entry { double lo, hi; Eigen::Index n_in; double ro, rs; Vector g; };
+    static std::deque<Entry> cache;
+    static std::mutex        mtx;
+
+    const Eigen::Index n_in = lam.size();
+    const double lo = lam[0];
+    const double hi = lam[n_in - 1];
+
+    std::lock_guard<std::mutex> lk(mtx);
+    for (const auto& e : cache)
+        if (e.lo == lo && e.hi == hi && e.n_in == n_in &&
+            e.ro == resOffset && e.rs == resSlope)
+            return e.g;
+
+    const double R    = std::max(resOffset + resSlope * lo,
+                                 resOffset + resSlope * hi);
+    const double span = std::log(hi / lo);
+    const double want = std::ceil(span * hhe_oversample() * R) + 1.0;
+    const Eigen::Index n = (want >= 2.0 && want < double(n_in))
+                         ? static_cast<Eigen::Index>(want) : n_in;
+
+    Vector g(n);
+    const double step = span / static_cast<double>(n - 1);
+    for (Eigen::Index i = 0; i < n; ++i)
+        g[i] = lo * std::exp(static_cast<double>(i) * step);
+    g[0]     = lo;
+    g[n - 1] = hi;
+    cache.push_back({lo, hi, n_in, resOffset, resSlope, std::move(g)});
+    return cache.back().g;
+}
+
+/*  Kernel taps for rotating on a log-uniform grid: at least four per grid
+ *  step across the profile.  The routine samples the profile at the taps
+ *  and interpolates the flux linearly between grid points; with fewer taps
+ *  than points under the profile some points get no tap and others two,
+ *  and on the 96-per-R grid at 140 km/s 81 taps were off by 1e-4.          */
+int rotation_taps(const Vector& lam, double vsini_kms)
+{
+    constexpr double c_km = 299792.458;
+    const double step = std::log(lam[1] / lam[0]);
+    const double span = 2.0 * vsini_kms / c_km;
+    return std::max(81, 4 * static_cast<int>(std::ceil(span / step)) + 1);
 }
 
 /*  The HHE cube spans the stellar axes in grid.fits order; its file path
@@ -624,6 +732,27 @@ std::vector<const GridAxis*> ModelGrid::element_cube_axes(int s) const
     return { ax_z, ax_he, ax_x, ax_g, ax_t, ax_a };
 }
 
+/*  Decided from HHE/lambda.fits, sliced to the window exactly as read_fits()
+ *  slices the corners, and remembered per grid and window.  A grid without
+ *  lambda.fits (read_fits then takes the corner's own "l" column) keeps the
+ *  per-corner path rather than reading a corner just to decide.            */
+bool ModelGrid::hhe_rotate_after_ok() const
+{
+    static std::mutex                                     mtx;
+    static std::map<std::pair<std::string, std::size_t>, bool> known;
+
+    const auto key = std::make_pair(base_, window_key_);
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        if (auto it = known.find(key); it != known.end()) return it->second;
+    }
+    const bool ok = grid_path_exists(base_ + "/HHE/lambda.fits") &&
+                    near_log_uniform(hhe_lambda());
+    std::lock_guard<std::mutex> lk(mtx);
+    known.emplace(key, ok);
+    return ok;
+}
+
 /* =================================================================== */
 Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                                   double he,double xi,double vsini,
@@ -647,6 +776,49 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
         return hhe_corner_path(base_, cube, c);
     };
 
+    /* ---------- where the rotation happens ------------------------ *
+     *  Per corner: each corner is rotated, then degraded, on the native
+     *  grid and cached that way.  vsini is then part of every corner's
+     *  key, so with vsini free each new value -- every LM step, every
+     *  Jacobian column for vsini -- re-reads and re-convolves all eight
+     *  corner files.  On synthe's 440 k-point grid that is ~0.6 s a
+     *  corner and up to 1 GB of rotational weights each, which is what
+     *  made those fits 20-100x slower than with vsini frozen.
+     *
+     *  Rotate-after: each corner is degraded onto a log-uniform grid
+     *  (hhe_conv_grid) and cached without vsini; the corners are
+     *  interpolated there and the result is rotated once.  Corner
+     *  interpolation is a weighted sum, so moving it past either
+     *  convolution is exact up to rounding; rotation and an instrumental
+     *  profile of constant width in velocity commute (ISIS convolves with
+     *  their combined profile for that reason, convolve_syn's
+     *  res_slope == 0 branch).  What does change is the sampling.
+     *  Measured on synthe against a reference rotated with 1001 taps and
+     *  rebinned from a 200-per-R grid, max |d| on the Nyquist bins a fit
+     *  sees (normalised flux; R = 1800, 7500 and Gr18's 0.455*lambda):
+     *
+     *      vsini       per corner (81 taps)    rotate-after (96 per R)
+     *        2          1e-6 .. 9e-5            5e-5 .. 2e-4
+     *       10          5e-6 .. 6e-5            1e-5 .. 4e-5
+     *       30          2e-5 .. 1e-4            5e-6 .. 2e-5
+     *       60          2e-4 .. 6e-4            5e-6 .. 9e-6
+     *      100+         6e-5 .. 2e-4            4e-6 .. 1e-5
+     *
+     *  The per-corner path rotates the *unbroadened* spectrum, whose lines
+     *  are a few km/s wide, with 81 taps -- 3.5 km/s apart at 140 km/s --
+     *  and aliases; rotate-after works on the degraded spectrum with taps
+     *  at a quarter of the grid step.  Both are 25x or more below the noise
+     *  of an S/N = 200 spectrum everywhere.
+     *
+     *  Only on grids that are near log-uniform (near_log_uniform), and only
+     *  with an instrumental profile to band-limit the model.  The sdB-type
+     *  grids keep the per-corner path: they are small enough that it is
+     *  cheap, and there the two orders differ by up to 2e-3 with no
+     *  reference to say which is closer.                                  */
+    const bool degrade = (resOffset != 0 || resSlope != 0);
+    const bool rotate_after = degrade && !force_corner_path() &&
+                              hhe_rotate_after_ok();
+
     /* ---------- helper to fetch / cache one corner ---------------- */
     /*  nullptr: the file turned out not to exist (now registered).       */
     auto fetch = [&](const CubeCorner& cn)->SpectrumPtr {
@@ -668,7 +840,11 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
          *  process-wide cache and serve each other's spectra.              */
         k = hash_combine(k, std::hash<std::string>{}(base_));
         k = hash_combine(k, hash_combine(0x5152A710ULL, std::size_t(with_continuum)));
-        k = hash_combine(k, hash_double(vsini));      // Include vsini in cache key
+        /*  A rotate-after corner holds no rotation, so vsini stays out of its
+         *  key -- that is the whole point -- and a tag keeps the two kinds
+         *  of entry apart.                                                */
+        k = rotate_after ? hash_combine(k, 0x0DE6A4ADULL)
+                         : hash_combine(k, hash_double(vsini));
         k = hash_combine(k, hash_double(resOffset));
         k = hash_combine(k, hash_double(resSlope));
         k = hash_combine(k, window_key_);             // slice is part of the key
@@ -685,6 +861,27 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                              //std::cout << "[LoadSpec](fetch) Reading .fits ." << std::endl;
                              Spectrum raw = read_fits(path, with_continuum);
                              //std::cout << "[LoadSpec](fetch) Broadening." << vsini << std::endl;
+
+                             if (rotate_after) {
+                                 /*  Degraded, not rotated, on the coarse
+                                  *  grid.  The continuum is never broadened
+                                  *  (see below), only resampled onto it,
+                                  *  as build_metal_surface does.        */
+                                 const Vector& lc = hhe_conv_grid(
+                                     raw.lambda, resOffset, resSlope);
+                                 Spectrum result;
+                                 result.lambda = lc;
+                                 result.flux   = degrade_resolution(
+                                     raw.lambda, raw.flux, lc,
+                                     resOffset, resSlope);
+                                 if (with_continuum) {
+                                     result.cont     = interp_linear(
+                                         raw.lambda, raw.flux, lc);
+                                     result.cont_den = interp_linear(
+                                         raw.lambda, raw.cont_den, lc);
+                                 }
+                                 return result;
+                             }
 
                              // Apply rotational broadening FIRST
                              Vector rot_flux;
@@ -712,7 +909,8 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                                  *  is not bit-identical to what the ISIS
                                  *  comparison tests were recorded against --
                                  *  hence the switch rather than a replacement.
-                                 *  GAEL_ROT_SEGMENTS=0 restores the old path.  */
+                                 *  The single-grid routine is the default;
+                                 *  GAEL_ROT_SEGMENTS=1 selects this one.  */
                                  rot_flux = use_rot_segments()
                                      ? rotational_broaden(raw.lambda, raw.flux,
                                                           raw.lambda, vsini)
@@ -798,6 +996,16 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
     //std::cout << "[LoadSpec] Done!" << std::endl;
     if(wsum>0.0) out.flux.array() /= wsum;
 
+    /*  The one rotation of a rotate-after evaluation.  Corners carry no
+     *  sigma there (it would be one more copy of a constant per corner).  */
+    if (rotate_after) {
+        out.sigma = Vector::Ones(out.lambda.size());
+        if (vsini >= 0.1)
+            out.flux = rotational_broaden(out.lambda, out.flux, out.lambda,
+                                          vsini, 0.6,
+                                          rotation_taps(out.lambda, vsini));
+    }
+
     /*  The continuum is interp(c)/interp(f), not interp(c/f): ISIS forms the
      *  ratio *after* interpolating both columns across the hypercube
      *  (spectroscopic_fitting.sl, `c[k] = f[k]/interpol_syn(...)`).  The two
@@ -820,7 +1028,9 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
  * =================================================================== */
 static Vector read_lambda_column(const std::string& path)
 {
-    CCfits::FITS f(localize_grid_path(path), CCfits::Read);
+    const std::string local = localize_grid_path(path);
+    const auto fits_lock = lock_fits_file(local);
+    CCfits::FITS f(local, CCfits::Read);
     CCfits::ExtHDU& e = f.extension(1);
     std::vector<Real> tmp;
     e.column("l").read(tmp, 1, e.rows());
@@ -1035,7 +1245,9 @@ Spectrum ModelGrid::read_fits(const std::string& path, bool with_continuum) cons
     if (lam.size()==0) {
         fs::path lp = fs::path(base_) / "HHE" / "lambda.fits";
         if (grid_path_exists(lp.string())){
-            CCfits::FITS fl(localize_grid_path(lp.string()), CCfits::Read);
+            const std::string local = localize_grid_path(lp.string());
+            const auto fits_lock = lock_fits_file(local);
+            CCfits::FITS fl(local, CCfits::Read);
             CCfits::ExtHDU& e = fl.extension(1);
             Vec tmp; e.column("l").read(tmp,1,e.rows());
             lam = Eigen::Map<Vector>(tmp.data(),tmp.size());

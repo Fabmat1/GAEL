@@ -262,6 +262,10 @@ private:
     double      window_hi_  =  std::numeric_limits<double>::infinity();
     std::size_t window_key_ = 0;
 
+    /*  Whether this grid's metal-free models may be rotated after the corner
+     *  interpolation rather than per corner; see load_spectrum.            */
+    bool hhe_rotate_after_ok() const;
+
     Spectrum read_fits(const std::string& path, bool with_continuum) const;
     Spectrum read_element_fits(const std::string& path, int species_index) const;
     Vector   slice_to_window(const Vector& lam) const;

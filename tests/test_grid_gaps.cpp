@@ -269,8 +269,12 @@ static fs::path write_observation(const fs::path& dir, const Spectrum& model)
     std::ofstream out(p);
     out.precision(10);
     for (double lam = 4000.0; lam < 5500.0; lam += 0.8) {
-        const Eigen::Index i =
-            Eigen::Index(std::floor((lam - kLam0) / kDLam));
+        /*  Located by search: a degraded model comes back on whatever grid
+         *  load_spectrum convolved onto, not necessarily the native one.   */
+        const Eigen::Index i = Eigen::Index(
+            std::upper_bound(model.lambda.data(),
+                             model.lambda.data() + model.lambda.size(), lam) -
+            model.lambda.data()) - 1;
         const double a = (lam - model.lambda[i]) /
                          (model.lambda[i + 1] - model.lambda[i]);
         const double f = (1 - a) * model.flux[i] + a * model.flux[i + 1];

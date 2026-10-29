@@ -96,3 +96,14 @@ set_tests_properties(gael_vs_isis_smoke PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 1800
     LABELS "comparison")
+
+# Fast, hermetic unit test: fits in one process opening the same FITS files
+# concurrently (cfitsio shares one FITSfile per name across handles).
+add_executable(test_fits_concurrency test_fits_concurrency.cpp)
+target_link_libraries(test_fits_concurrency PRIVATE GAELcore)
+add_test(NAME fits_concurrency COMMAND test_fits_concurrency)
+set_tests_properties(fits_concurrency PROPERTIES TIMEOUT 300 LABELS "unit")
+
+# Measurement tool, not a test: accuracy of the metal-free model pipeline.
+add_executable(bench_hhe_order bench_hhe_order.cpp)
+target_link_libraries(bench_hhe_order PRIVATE GAELcore)
