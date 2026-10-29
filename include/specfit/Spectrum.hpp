@@ -45,9 +45,16 @@ struct Spectrum {
      *  interpolated across the hypercube corners and only then divided, as
      *  ISIS does -- so the two sums have to be carried separately until the
      *  corner loop is finished.  ModelGrid::load_spectrum clears it.
+     *
+     *  `cont_lambda` is the grid `cont` lives on when that is not `lambda`;
+     *  empty means `lambda`.  The rotate-after path reports the flux on a
+     *  coarse grid but keeps the continuum on the native one: the ratio
+     *  carries the corners' line depths, which a coarse grid resamples by
+     *  up to 2e-3 in deep cores such as Ca II K.
      * ------------------------------------------------------------------ */
     Vector               cont;         // continuum, calibrated flux units
     Vector               cont_den;     // scratch: normalised flux ("f" column)
+    Vector               cont_lambda;  // grid of `cont`, if not `lambda`
 
 
     // SNR estimation methods

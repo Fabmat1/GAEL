@@ -100,7 +100,8 @@ std::size_t SpectrumCache::footprint_(const Spectrum& s)
                                     s.flux.size()     +
                                     s.sigma.size()    +
                                     s.cont.size()     +
-                                    s.cont_den.size()) * sizeof(Real)
+                                    s.cont_den.size() +
+                                    s.cont_lambda.size()) * sizeof(Real)
          + s.ignoreflag.size() * sizeof(int);
 }
 

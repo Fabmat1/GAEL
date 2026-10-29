@@ -865,8 +865,7 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                              if (rotate_after) {
                                  /*  Degraded, not rotated, on the coarse
                                   *  grid.  The continuum is never broadened
-                                  *  (see below), only resampled onto it,
-                                  *  as build_metal_surface does.        */
+                                  *  (see below).                         */
                                  const Vector& lc = hhe_conv_grid(
                                      raw.lambda, resOffset, resSlope);
                                  Spectrum result;
@@ -874,11 +873,13 @@ Spectrum ModelGrid::load_spectrum(double teff,double logg,double z,
                                  result.flux   = degrade_resolution(
                                      raw.lambda, raw.flux, lc,
                                      resOffset, resSlope);
+                                 /*  The continuum stays on the native
+                                  *  grid, exactly as the per-corner path
+                                  *  keeps it (see Spectrum::cont_lambda). */
                                  if (with_continuum) {
-                                     result.cont     = interp_linear(
-                                         raw.lambda, raw.flux, lc);
-                                     result.cont_den = interp_linear(
-                                         raw.lambda, raw.cont_den, lc);
+                                     result.cont        = raw.flux;
+                                     result.cont_den    = raw.cont_den;
+                                     result.cont_lambda = raw.lambda;
                                  }
                                  return result;
                              }

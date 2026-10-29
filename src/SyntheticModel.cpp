@@ -433,7 +433,10 @@ SpectrumPtr compute_synthetic_cached(const ModelGrid&    grid,
              *  that a caller mixing components can weight flux and continuum
              *  consistently bin by bin.                                      */
             if (with_continuum)
-                out.cont = trapezoidal_rebin(lam_shift, surf.cont, lambda_obs);
+                out.cont = trapezoidal_rebin(
+                    surf.cont_lambda.size() ? Vector(surf.cont_lambda * factor)
+                                            : lam_shift,
+                    surf.cont, lambda_obs);
 
             return out;    // moved into cache (as shared_ptr target)
         });
