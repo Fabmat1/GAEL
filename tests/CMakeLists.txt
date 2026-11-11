@@ -77,6 +77,12 @@ target_link_libraries(test_lm_convergence PRIVATE GAELcore)
 add_test(NAME lm_convergence COMMAND test_lm_convergence)
 set_tests_properties(lm_convergence PROPERTIES TIMEOUT 120 LABELS "unit")
 
+# Fast, hermetic unit test: continuum-jitter anchor ranges stay valid.
+add_executable(test_continuum_jitter test_continuum_jitter.cpp)
+target_link_libraries(test_continuum_jitter PRIVATE GAELcore)
+add_test(NAME continuum_jitter COMMAND test_continuum_jitter)
+set_tests_properties(continuum_jitter PROPERTIES TIMEOUT 60 LABELS "unit")
+
 gael_add_comparison_test(gael_vs_isis_mock test_mock_vs_isis.py)
 gael_add_comparison_test(gael_vs_isis_real test_real_vs_isis.py)
 

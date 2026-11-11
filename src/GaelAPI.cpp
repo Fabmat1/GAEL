@@ -899,10 +899,8 @@ FitResult GaelSession::run_impl()
             for (int k = 0; k < gs.cont_jitter_K; ++k) {
                 const double sc = uscale(rng), ph = uphase(rng);
                 for (std::size_t d = 0; d < datasets.size(); ++d) {
-                    auto iv = ds_intervals[d];
-                    for (auto& a : iv) { const double st = a[2]*sc;
-                                         a[2] = st; a[0] = a[0] + ph*st; }
-                    reanchor(datasets[d], iv);
+                    reanchor(datasets[d],
+                             jitter_anchor_intervals(ds_intervals[d], sc, ph));
                 }
                 model.params = warm;                       // warm start
                 wcfg.progress_phase =

@@ -1,6 +1,7 @@
 #pragma once
 #include "Types.hpp"
 #include "Spectrum.hpp"
+#include <array>
 #include <vector>
 #include <tuple>
 
@@ -18,6 +19,18 @@ namespace specfit {
 Vector anchors_from_intervals(
         const std::vector<std::tuple<double, double, double>>& intervals,
         const Spectrum& spectrum);
+
+/**
+ * Anchor intervals for one continuum-jitter refit: every step is scaled by
+ * `scale` and every start moves `phase` (0..1) of the scaled step to the red.
+ *
+ * The start never moves past the end.  A range narrower than the shift (one
+ * trimmed to the spectrum's edge, say) keeps only its end anchor, which is
+ * what [start, end, step] means when no start + k*step falls inside it.
+ */
+std::vector<std::array<double, 3>> jitter_anchor_intervals(
+        std::vector<std::array<double, 3>> intervals,
+        double scale, double phase);
 
 /**
  * Helper – simple linear interpolation y(x_out)  (no extrapolation).

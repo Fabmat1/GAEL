@@ -8,6 +8,19 @@ namespace specfit {
 
 
 /* ---------------------------------------------------------------------- */
+std::vector<std::array<double, 3>> jitter_anchor_intervals(
+        std::vector<std::array<double, 3>> intervals,
+        double scale, double phase)
+{
+    for (auto& a : intervals) {
+        const double step = a[2] * scale;
+        a[2] = step;
+        a[0] = std::min(a[0] + phase * step, a[1]);
+    }
+    return intervals;
+}
+
+/* ---------------------------------------------------------------------- */
 Vector anchors_from_intervals(
         const std::vector<std::tuple<double,double,double>>& intervals,
         const Spectrum& spectrum)
