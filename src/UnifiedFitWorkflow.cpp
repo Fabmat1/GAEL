@@ -192,6 +192,32 @@ UnifiedFitWorkflow::param_limits(const ParamSpec& ps, int comp,
     }
 }
 
+bool UnifiedFitWorkflow::set_dataset_start(int c, int d, const std::string& name,
+                                           double value)
+{
+    const int n_ds = static_cast<int>(datasets_.size());
+    if (c < 0 || c >= indexer_.n_components() || d < 0 || d >= n_ds)
+        return false;
+    const int gi = indexer_.index_of(c, d, name);
+    if (gi < 0) return false;
+    // Tied: every dataset maps to the same slot, so a value for one dataset
+    // would silently become everyone's.
+    if (n_ds > 1) {
+        const int other = indexer_.index_of(c, d == 0 ? 1 : 0, name);
+        if (other == gi) return false;
+    }
+    unified_params_[static_cast<std::size_t>(gi)] = value;
+    return true;
+}
+
+void UnifiedFitWorkflow::warm_start_stellar(const std::vector<double>& params)
+{
+    const std::size_t n = static_cast<std::size_t>(indexer_.total_stellar_params);
+    if (params.size() < n) return;
+    std::copy(params.begin(), params.begin() + static_cast<std::ptrdiff_t>(n),
+              unified_params_.begin());
+}
+
 /* ------------------------------------------------------------------------- *
  *  Push the current solution back into model_.params, so callers reading the
  *  model see the fit.  Dataset 0 is the representative one: a tied parameter

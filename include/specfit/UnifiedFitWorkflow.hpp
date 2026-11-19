@@ -77,6 +77,19 @@ public:
 
     void run();
 
+    /*  Start component c's parameter `name` at `value` for dataset d only,
+     *  before run().  Applies when that parameter has a slot of its own per
+     *  dataset (untied, or a single-dataset fit); returns false, changing
+     *  nothing, for a tied parameter or a name the component lacks.        */
+    bool set_dataset_start(int c, int d, const std::string& name, double value);
+
+    /*  Replace the stellar block of the parameter vector with `params`, laid
+     *  out as another workflow over the same datasets, components and untie
+     *  list lays it out (its get_parameters()).  Warm-starts an ensemble
+     *  refit from the converged solution of every spectrum, not only the
+     *  first one's, which is all a SharedModel::params can carry.          */
+    void warm_start_stellar(const std::vector<double>& params);
+
     // Warm-started light refit for the continuum-jitter error ensemble:
     // settle the (re-seeded) continuum at the current stellar values, then one
     // joint continuum+stellar solve. Skips the progressive stages, the

@@ -174,6 +174,19 @@ struct ObservationInput {
     std::vector<std::array<double,2>> ignore;
     std::vector<std::array<double,3>> cspline_anchorpoints;
 
+    /*  Start values that differ from spectrum to spectrum: one map per
+     *  stellar component (index = component), keyed by parameter name
+     *  ("vrad", "vsini", "teff", an element such as "FE", ...).  Each entry
+     *  replaces that component's StellarComponentInit value for this
+     *  observation's spectra only.
+     *
+     *  Only an untied parameter (GlobalSettings::untie_params) has a value of
+     *  its own per spectrum, so only those take a per-spectrum start; one for
+     *  a tied parameter is ignored and logged.  A fit of a single spectrum is
+     *  the exception: there every parameter is that spectrum's own.  Names
+     *  the component's grid does not have are ignored too.                */
+    std::vector<std::map<std::string,double>> start_values;
+
     ObservationInput();
     ~ObservationInput();
     ObservationInput(const ObservationInput&);

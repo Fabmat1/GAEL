@@ -130,6 +130,14 @@ FitInput fit_input_from_json_file(const std::string& path)
         if (obs.contains("csplineAnchorpoints"))
             oi.cspline_anchorpoints =
                 obs["csplineAnchorpoints"].get<std::vector<std::array<double,3>>>();
+        /*  [ {"vrad": -310}, {} ]: one object per component.               */
+        if (obs.contains("startValues"))
+            for (const auto& cj : obs["startValues"]) {
+                std::map<std::string,double> m;
+                for (const auto& [name, val] : cj.items())
+                    m[name] = val.get<double>();
+                oi.start_values.push_back(std::move(m));
+            }
 
         for (const auto& fj : obs.at("files")) {
             SpectrumFileInput f;
@@ -251,6 +259,15 @@ void fit_input_to_json_file(const FitInput& fi, const std::string& path)
         if (!oi.ignore.empty())               o["ignore"] = oi.ignore;
         if (!oi.cspline_anchorpoints.empty())
             o["csplineAnchorpoints"] = oi.cspline_anchorpoints;
+        if (!oi.start_values.empty()) {
+            json sv = json::array();
+            for (const auto& m : oi.start_values) {
+                json cj = json::object();
+                for (const auto& [name, v] : m) cj[name] = v;
+                sv.push_back(std::move(cj));
+            }
+            o["startValues"] = std::move(sv);
+        }
 
         json files = json::array();
         for (const auto& f : oi.files) {

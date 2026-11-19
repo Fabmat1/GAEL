@@ -578,6 +578,8 @@ FitResult GaelSession::run_impl()
     std::vector<DataSet> datasets;
     // anchor intervals per accepted dataset (for the continuum-jitter ensemble)
     std::vector<std::vector<std::array<double,3>>> ds_intervals;
+    // per-spectrum start values per accepted dataset (ObservationInput)
+    std::vector<std::vector<std::map<std::string,double>>> ds_starts;
     int n_done = 0;
     for (const auto& obs : fi.observations) {
         for (const auto& f : obs.files) {
@@ -596,6 +598,7 @@ FitResult GaelSession::run_impl()
                 datasets.push_back(std::move(ds));
                 ds_intervals.push_back(
                     f.cspline_anchorpoints.value_or(obs.cspline_anchorpoints));
+                ds_starts.push_back(obs.start_values);
             } else {
                 R.rejected_files.push_back(f.filename);
                 R.rejected_indices.push_back(input_index);
@@ -728,6 +731,24 @@ FitResult GaelSession::run_impl()
     }
 
     ::specfit::UnifiedFitWorkflow wf(datasets, model, wcfg, frozen, nt);
+
+    /*  Per-spectrum start values, on top of the component's own.            */
+    for (std::size_t d = 0; d < ds_starts.size(); ++d) {
+        for (std::size_t c = 0; c < ds_starts[d].size(); ++c) {
+            if (c >= comps.size()) break;          // a dropped component
+            for (const auto& [name, value] : ds_starts[d][c]) {
+                if (wf.set_dataset_start(static_cast<int>(c),
+                                         static_cast<int>(d), name, value)) {
+                    log("start c" + std::to_string(c + 1) + "_" + name + " = " +
+                        std::to_string(value) + " for " + datasets[d].name);
+                } else {
+                    log("ignored per-spectrum start c" + std::to_string(c + 1) +
+                        "_" + name + " for " + datasets[d].name +
+                        " (parameter is tied across spectra or not in the grid)");
+                }
+            }
+        }
+    }
 
     /*  Now that the datasets and the free-parameter set are known, replace
      *  the placeholder priors of the jitter refits with the workflow's own
@@ -911,6 +932,10 @@ FitResult GaelSession::run_impl()
                                       std::to_string(k + 1) + '/' +
                                       std::to_string(gs.cont_jitter_K);
                 ::specfit::UnifiedFitWorkflow jwf(datasets, model, wcfg, frozen_ens, nt);
+                /*  model.params only holds dataset 0's values, so an untied
+                 *  parameter (vrad above all) would restart every spectrum
+                 *  at the first one's solution.                          */
+                jwf.warm_start_stellar(R.raw_params);
                 jwf.quick_refit();
                 const auto p = jwf.get_parameters();
                 const auto& ji = jwf.get_indexer();

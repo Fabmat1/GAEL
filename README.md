@@ -206,6 +206,24 @@ the other stellar parameters, tied across spectra unless listed in
 `untieParams`. `c1_sur_ratio` defines the scale and is always 1 and frozen;
 the others are bounded to `[0, 1500]`, as `stellar_set_ranges` bounds them.
 
+### Per-spectrum start values
+
+An untied parameter has a value of its own for every spectrum, but by default
+they all start from the `initialGuess` value. An observation can start its
+spectra elsewhere with `startValues`, one object per component:
+
+```jsonc
+"observations": [
+  { "files": [ ... ], "startValues": [ {"vrad": -310.0} ] },
+  { "files": [ ... ] }
+]
+```
+
+Only parameters listed in `untieParams` take a per-spectrum start (in a fit of
+a single spectrum, every parameter does); any other entry is ignored and
+logged. The continuum-jitter refits start every spectrum from its own
+converged values.
+
 The components are combined the way ISIS combines them: the *calibrated*
 model fluxes (the grid's `c` column) are summed with the surface ratios as
 weights and divided by the summed continua,
